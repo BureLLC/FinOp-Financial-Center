@@ -1,0 +1,53 @@
+<svg width="240" height="240" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#060810"/>
+      <stop offset="100%" stop-color="#0d1829"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#16a34a"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="240" height="240" rx="48" fill="url(#bg)"/>
+
+  <!-- Border -->
+  <rect width="240" height="240" rx="48" fill="none" stroke="rgba(56,189,248,0.25)" stroke-width="1.5"/>
+
+  <!-- Grid lines (subtle) -->
+  <line x1="40" y1="120" x2="200" y2="120" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+  <line x1="120" y1="40" x2="120" y2="200" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
+
+  <!-- Chart bars rising -->
+  <rect x="52" y="148" width="18" height="44" rx="4" fill="url(#blue)" opacity="0.5"/>
+  <rect x="76" y="128" width="18" height="64" rx="4" fill="url(#blue)" opacity="0.65"/>
+  <rect x="100" y="104" width="18" height="88" rx="4" fill="url(#blue)" opacity="0.8"/>
+  <rect x="124" y="80" width="18" height="112" rx="4" fill="url(#blue)" opacity="0.9"/>
+  <rect x="148" y="60" width="18" height="132" rx="4" fill="url(#blue)"/>
+
+  <!-- Trend line over bars -->
+  <polyline points="61,145 85,124 109,100 133,76 157,56" fill="none" stroke="url(#accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+
+  <!-- Dots on trend line -->
+  <circle cx="61" cy="145" r="4" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="85" cy="124" r="4" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="109" cy="100" r="4" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="133" cy="76" r="4" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="157" cy="56" r="5" fill="#22c55e" filter="url(#glow)"/>
+
+  <!-- F lettermark top left -->
+  <text x="52" y="46" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="800" fill="url(#blue)" opacity="0.9">F</text>
+
+  <!-- Bottom label -->
+  <text x="120" y="218" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="rgba(56,189,248,0.7)" text-anchor="middle" letter-spacing="3">FINOPS</text>
+</svg>

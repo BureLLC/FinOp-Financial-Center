@@ -1,0 +1,36 @@
+name: Daily Supabase Backup
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get install -y postgresql-client
+
+      - name: Dump database
+        env:
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          pg_dump \
+            -h aws-1-us-east-1.pooler.supabase.com \
+            -U postgres.hxaxmhtkzmfjtaqtcbvk \
+            -p 5432 \
+            -d postgres \
+            -f supabase/backup.sql
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add supabase/backup.sql
+          git commit -m "Automated daily Supabase backup" || echo "No changes"
+          git push
