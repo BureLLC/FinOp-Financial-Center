@@ -13,10 +13,8 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL 17 client
-        uses: harmon758/postgresql-action@v1
-        with:
-          postgresql version: '17'
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Dump database
         env:
@@ -27,6 +25,8 @@ jobs:
             -U postgres.hxaxmhtkzmfjtaqtcbvk \
             -p 5432 \
             -d postgres \
+            --no-owner \
+            --no-privileges \
             -f supabase/backup.sql
 
       - name: Commit and push if changed
