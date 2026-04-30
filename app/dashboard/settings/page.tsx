@@ -160,6 +160,10 @@ export default function SettingsPage() {
   const [appSaving, setAppSaving] = useState(false);
   const [appMsg, setAppMsg] = useState<string | null>(null);
 
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteMsg, setDeleteMsg] = useState<string | null>(null);
+
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
@@ -294,6 +298,48 @@ export default function SettingsPage() {
     }).eq("id", user.id);
     setNotifMsg(error ? "Failed to save." : "Notification preferences saved.");
     setNotifSaving(false);
+  };
+
+
+  const deleteAccount = async () => {
+    if (deleteConfirm !== "DELETE") {
+      setDeleteMsg('Type DELETE to confirm account deletion.');
+      return;
+    }
+
+    setDeleteBusy(true);
+    setDeleteMsg(null);
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setDeleteMsg('No active session found.');
+      setDeleteBusy(false);
+      return;
+    }
+
+    const userId = user.id;
+
+    try {
+      await supabase.from("alerts").delete().eq("user_id", userId);
+      await supabase.from("transactions").delete().eq("user_id", userId);
+      await supabase.from("positions").delete().eq("user_id", userId);
+      await supabase.from("financial_accounts").delete().eq("user_id", userId);
+      await supabase.from("integration_connections").delete().eq("user_id", userId);
+      await supabase.from("tax_estimates").delete().eq("user_id", userId);
+      await supabase.from("tax_profiles").delete().eq("user_id", userId);
+      await supabase.from("trades").delete().eq("user_id", userId);
+      await supabase.from("trading_journal").delete().eq("user_id", userId);
+      await supabase.from("write_offs").delete().eq("user_id", userId);
+      await supabase.from("savings_goals").delete().eq("user_id", userId);
+      await supabase.from("budget_categories").delete().eq("user_id", userId);
+      await supabase.from("user_profiles").delete().eq("id", userId);
+
+      await supabase.auth.signOut();
+      window.location.href = "/auth";
+    } catch {
+      setDeleteMsg("Account deletion failed. Please contact support at admin@burellc.com.");
+      setDeleteBusy(false);
+    }
   };
 
   const saveAppPreferences = async () => {
@@ -575,6 +621,33 @@ export default function SettingsPage() {
         <button onClick={saveAppPreferences} disabled={appSaving}
           style={{ padding: "10px 20px", background: "linear-gradient(135deg, #2563eb, #1d4ed8)", border: "none", borderRadius: "9px", color: "#fff", fontSize: "13px", fontWeight: 700, cursor: appSaving ? "not-allowed" : "pointer", opacity: appSaving ? 0.7 : 1 }}>
           {appSaving ? "Saving..." : "Save Preferences"}
+        </button>
+      </div>
+
+
+      {/* ── ACCOUNT DELETION ── */}
+      <div style={sectionStyle}>
+        <div style={sectionHeaderStyle}>Account Deletion</div>
+        <div style={sectionDescStyle}>Delete your account and remove financial records from active systems. This action cannot be undone.</div>
+
+        <div style={{ padding: "14px 16px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "10px", marginBottom: "12px" }}>
+          <div style={{ fontSize: "12px", color: "#fca5a5", lineHeight: 1.7 }}>
+            For App Store and Google Play subscriptions, cancel auto-renew first in your Apple/Google subscription settings.
+          </div>
+        </div>
+
+        <label style={labelStyle}>TYPE DELETE TO CONFIRM</label>
+        <input value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} placeholder="DELETE" style={{ ...inputStyle, marginBottom: "12px" }} />
+
+        {deleteMsg && (
+          <div style={{ padding: "10px 12px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "8px", fontSize: "12px", color: "#ef4444", marginBottom: "14px" }}>
+            {deleteMsg}
+          </div>
+        )}
+
+        <button onClick={deleteAccount} disabled={deleteBusy}
+          style={{ padding: "10px 20px", background: "linear-gradient(135deg, #dc2626, #b91c1c)", border: "none", borderRadius: "9px", color: "#fff", fontSize: "13px", fontWeight: 700, cursor: deleteBusy ? "not-allowed" : "pointer", opacity: deleteBusy ? 0.7 : 1 }}>
+          {deleteBusy ? "Deleting..." : "Delete Account"}
         </button>
       </div>
 

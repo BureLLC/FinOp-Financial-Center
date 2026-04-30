@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import Sidebar from "../components/Sidebar";
 import AlertDropdown from "../components/AlertDropdown";
 import UserMenu from "../components/UserMenu";
@@ -16,7 +16,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const router = useRouter();
-  const pathname = usePathname();
   const supabase = createClient();
 
   useEffect(() => {
@@ -157,10 +156,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         />
       )}
 
-      {/* LevelUP — hidden on mobile unless on levelup page */}
-      {(!isMobile || pathname === "/dashboard/levelup") && (
-        <LevelUpAssistant pathname={pathname} />
-      )}
     </div>
   );
 }

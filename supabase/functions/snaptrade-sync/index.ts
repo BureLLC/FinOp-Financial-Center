@@ -162,6 +162,7 @@ serve(async (req) => {
         .from("financial_accounts")
         .select("id")
         .eq("user_id", user.id)
+        .eq("provider", "snaptrade")
         .eq("provider_account_id", acctId)
         .maybeSingle()
 
@@ -195,6 +196,18 @@ serve(async (req) => {
         await supabase.from("financial_accounts").insert({ ...acctRecord, created_at: new Date().toISOString() })
       }
 
+
+      const { data: resolvedAccount } = await supabase
+        .from("financial_accounts")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("provider", "snaptrade")
+        .eq("provider_account_id", acctId)
+        .single()
+
+      if (!resolvedAccount) continue
+      const financialAccountId = resolvedAccount.id
+
       // Get positions for this account
       const posResult = await snapTradeGetPositions(clientId, consumerKey, acctId, {
         userId: snapUserId, userSecret,
@@ -216,7 +229,7 @@ serve(async (req) => {
           .from("positions")
           .select("id")
           .eq("user_id", user.id)
-          .eq("provider_account_id", acctId)
+          .eq("financial_account_id", financialAccountId)
           .eq("asset_symbol", symbol)
           .maybeSingle()
 

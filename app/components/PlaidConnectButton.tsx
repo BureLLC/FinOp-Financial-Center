@@ -1,7 +1,8 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 import { createClient } from "../../src/lib/supabase";
+import { functionBase } from "../../src/lib/function-base";
 
 interface Props {
   onSuccess?: () => void;
@@ -26,7 +27,7 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
         if (!session?.access_token) { setMessage("Session error. Please log in again."); return; }
 
         const response = await fetch(
-          "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/plaid-exchange-token",
+          `${functionBase}/plaid-exchange-token`,
           {
             method: "POST",
             headers: {
@@ -63,9 +64,7 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
     },
   });
 
-  // Get link token on mount
-  useEffect(() => {
-    const getLinkToken = async () => {
+  const getLinkToken = useCallback(async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.access_token) { setMessage("No session found. Please log in."); setLoading(false); return; }
@@ -74,7 +73,7 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
         if (!user?.id) { setMessage("User not found."); setLoading(false); return; }
 
         const response = await fetch(
-          "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/plaid-create-link-token",
+          `${functionBase}/plaid-create-link-token`,
           {
             method: "POST",
             headers: {
@@ -93,16 +92,18 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
           return;
         }
 
-        sessionStorage.setItem("plaid_link_token", data.link_token);
         setLinkToken(data.link_token);
         setLoading(false);
       } catch (err) {
         setMessage(err instanceof Error ? err.message : "Unknown error.");
         setLoading(false);
       }
-    };
-    getLinkToken();
-  }, []);
+  }, [supabase]);
+
+  // Get link token on mount
+  useEffect(() => {
+    void getLinkToken();
+  }, [getLinkToken]);
 
   // Auto-open Plaid Link when ready
   useEffect(() => {
@@ -156,7 +157,7 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
       )}
 
       {!loading && !exchanging && !success && message && !message.includes("✅") && (
-        <button onClick={() => { setMessage(null); setLinkToken(null); setLoading(true); }}
+        <button onClick={() => { setMessage(null); setLinkToken(null); setLoading(true); void getLinkToken(); }}
           style={{ marginTop: "12px", width: "100%", padding: "10px", background: "rgba(37,99,235,0.1)", border: "1px solid rgba(37,99,235,0.25)", borderRadius: "9px", color: "#38bdf8", fontSize: "13px", cursor: "pointer" }}>
           Try Again
         </button>
