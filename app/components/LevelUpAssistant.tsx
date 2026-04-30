@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
+import { createClient } from "../../src/lib/supabase";
 
 interface Message {
   role: "user" | "assistant";
@@ -42,16 +43,24 @@ function RobotIcon({ size = 22 }: { size?: number }) {
 interface Props { pathname: string; }
 
 
-const levelUpState: { openedOnce: boolean; open: boolean; messages: Message[]; lastPopupAt: number | null } = {
-  openedOnce: false,
-  open: false,
-  messages: [],
-  lastPopupAt: null,
-};
+const levelUpStateByUser = new Map<string, { openedOnce: boolean; open: boolean; messages: Message[]; lastPopupAt: number | null }>();
+
+function getDefaultLevelUpState() {
+  return { openedOnce: false, open: false, messages: [], lastPopupAt: null };
+}
+
+function getLevelUpStateForUser(userId: string | null) {
+  const key = userId ?? "__anonymous__";
+  if (!levelUpStateByUser.has(key)) levelUpStateByUser.set(key, getDefaultLevelUpState());
+  return levelUpStateByUser.get(key)!;
+}
 
 export default function LevelUpAssistant({ pathname }: Props) {
-  const [open, setOpen] = useState(levelUpState.open);
-  const [messages, setMessages] = useState<Message[]>(levelUpState.messages);
+  const supabase = useMemo(() => createClient(), []);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const initialState = getLevelUpStateForUser(null);
+  const [open, setOpen] = useState(initialState.open);
+  const [messages, setMessages] = useState<Message[]>(initialState.messages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [showBubble, setShowBubble] = useState(false);
@@ -66,31 +75,68 @@ export default function LevelUpAssistant({ pathname }: Props) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
+
+  useEffect(() => {
+    let mounted = true;
+
+    const applyUserScope = (userId: string | null) => {
+      if (!mounted) return;
+      const scopedState = getLevelUpStateForUser(userId);
+      setCurrentUserId(userId);
+      setOpen(scopedState.open);
+      setMessages(scopedState.messages);
+      setShowBubble(false);
+    };
+
+    supabase.auth.getUser().then(({ data }) => {
+      applyUserScope(data.user?.id ?? null);
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      const nextUserId = session?.user?.id ?? null;
+
+      if (event === "SIGNED_OUT") {
+        levelUpStateByUser.delete(currentUserId ?? "__anonymous__");
+        applyUserScope(null);
+        return;
+      }
+
+      if ((currentUserId ?? null) !== nextUserId) {
+        applyUserScope(nextUserId);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, [supabase, currentUserId]);
   // Controlled auto-popup: once per session, then auto-minimize
   useEffect(() => {
     if (pathname === "/") return;
-    if (levelUpState.openedOnce) return;
+    if (getLevelUpStateForUser(currentUserId).openedOnce) return;
     setShowBubble(true);
     const openTimer = setTimeout(() => {
       setOpen(true);
-      levelUpState.open = true;
-      levelUpState.openedOnce = true;
-      levelUpState.lastPopupAt = Date.now();
+      const state = getLevelUpStateForUser(currentUserId);
+      state.open = true;
+      state.openedOnce = true;
+      state.lastPopupAt = Date.now();
     }, 800);
     const minimizeTimer = setTimeout(() => {
       setOpen(false);
-      levelUpState.open = false;
+      getLevelUpStateForUser(currentUserId).open = false;
     }, 18000);
     return () => { clearTimeout(openTimer); clearTimeout(minimizeTimer); };
-  }, [pathname]);
+  }, [pathname, currentUserId]);
 
   useEffect(() => {
-    levelUpState.messages = messages;
+    getLevelUpStateForUser(currentUserId).messages = messages;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
   useEffect(() => {
-    levelUpState.open = open;
+    getLevelUpStateForUser(currentUserId).open = open;
   }, [open]);
 
   useEffect(() => {
