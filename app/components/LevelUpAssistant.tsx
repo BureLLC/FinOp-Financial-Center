@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
+import { createClient } from "../../src/lib/supabase";
 
 interface Message {
   role: "user" | "assistant";
@@ -41,9 +42,25 @@ function RobotIcon({ size = 22 }: { size?: number }) {
 
 interface Props { pathname: string; }
 
+
+const levelUpStateByUser = new Map<string, { openedOnce: boolean; open: boolean; messages: Message[]; lastPopupAt: number | null }>();
+
+function getDefaultLevelUpState() {
+  return { openedOnce: false, open: false, messages: [], lastPopupAt: null };
+}
+
+function getLevelUpStateForUser(userId: string | null) {
+  const key = userId ?? "__anonymous__";
+  if (!levelUpStateByUser.has(key)) levelUpStateByUser.set(key, getDefaultLevelUpState());
+  return levelUpStateByUser.get(key)!;
+}
+
 export default function LevelUpAssistant({ pathname }: Props) {
-  const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const supabase = useMemo(() => createClient(), []);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const initialState = getLevelUpStateForUser(null);
+  const [open, setOpen] = useState(initialState.open);
+  const [messages, setMessages] = useState<Message[]>(initialState.messages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [showBubble, setShowBubble] = useState(false);
@@ -58,16 +75,69 @@ export default function LevelUpAssistant({ pathname }: Props) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Show greeting bubble on page change
-  useEffect(() => {
-    setShowBubble(false);
-    const t = setTimeout(() => setShowBubble(true), 2000);
-    return () => clearTimeout(t);
-  }, [pathname]);
 
   useEffect(() => {
+    let mounted = true;
+
+    const applyUserScope = (userId: string | null) => {
+      if (!mounted) return;
+      const scopedState = getLevelUpStateForUser(userId);
+      setCurrentUserId(userId);
+      setOpen(scopedState.open);
+      setMessages(scopedState.messages);
+      setShowBubble(false);
+    };
+
+    supabase.auth.getUser().then(({ data }) => {
+      applyUserScope(data.user?.id ?? null);
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      const nextUserId = session?.user?.id ?? null;
+
+      if (event === "SIGNED_OUT") {
+        levelUpStateByUser.delete(currentUserId ?? "__anonymous__");
+        applyUserScope(null);
+        return;
+      }
+
+      if ((currentUserId ?? null) !== nextUserId) {
+        applyUserScope(nextUserId);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, [supabase, currentUserId]);
+  // Controlled auto-popup: once per session, then auto-minimize
+  useEffect(() => {
+    if (pathname === "/") return;
+    if (getLevelUpStateForUser(currentUserId).openedOnce) return;
+    setShowBubble(true);
+    const openTimer = setTimeout(() => {
+      setOpen(true);
+      const state = getLevelUpStateForUser(currentUserId);
+      state.open = true;
+      state.openedOnce = true;
+      state.lastPopupAt = Date.now();
+    }, 800);
+    const minimizeTimer = setTimeout(() => {
+      setOpen(false);
+      getLevelUpStateForUser(currentUserId).open = false;
+    }, 18000);
+    return () => { clearTimeout(openTimer); clearTimeout(minimizeTimer); };
+  }, [pathname, currentUserId]);
+
+  useEffect(() => {
+    getLevelUpStateForUser(currentUserId).messages = messages;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    getLevelUpStateForUser(currentUserId).open = open;
+  }, [open]);
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 100);
@@ -98,7 +168,7 @@ export default function LevelUpAssistant({ pathname }: Props) {
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
           max_tokens: 300,
-          system: `You are LevelUP, a concise AI financial assistant inside FinOps Financial Center. The user is on: ${pathname}. Be brief — max 3 sentences unless asked for more. Be helpful, warm, and financially accurate. Not professional financial advice.`,
+          system: `You are LevelUP, a concise AI financial assistant inside FinOps Financial Center. The user is on: ${pathname}. Be brief — max 3 sentences unless asked for more. Be helpful, warm, and financially accurate. Not professional financial advice. If asked about MFA/security, provide setup steps for authenticator app, backup codes, and recovery best practices. Never suggest bypasses or disabling MFA.`,
           messages: [
             ...messages.map((m) => ({ role: m.role, content: m.content })),
             { role: "user", content: userMsg },

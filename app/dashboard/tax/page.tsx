@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
+import { functionBase } from "../../../src/lib/function-base";
 
 interface TaxEstimate {
   id: string;
@@ -201,7 +202,7 @@ export default function TaxCenterPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
       const res = await fetch(
-        "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/orchestrate-refresh",
+        `${functionBase}/orchestrate-refresh`,
         { method: "POST", headers: { "Content-Type": "application/json", "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, "Authorization": `Bearer ${session.access_token}` }, body: JSON.stringify({}) }
       );
       if (res.ok) {
