@@ -153,7 +153,10 @@ export default function ContactPage() {
           <div style={{ display: "flex", gap: "16px", justifyContent: "center" }}>
             <a href="/privacy" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Privacy Policy</a>
             <a href="/terms" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Terms of Service</a>
+ codex/conduct-security-and-architecture-audit-qqgarn
             <a href="/disclosures" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Disclosures</a>
+
+ main
             <Link href="/" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Homepage</Link>
           </div>
         </div>
