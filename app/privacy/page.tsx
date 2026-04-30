@@ -283,7 +283,7 @@ For data deletion requests, account inquiries, or to exercise your privacy right
         </div>
 
         <div style={{ marginTop: "24px", textAlign: "center", fontSize: "12px", color: "#1e293b" }}>
-          © {new Date().getFullYear()} BURE LLC. All rights reserved. · FinOps Financial Center · <a href="/terms" style={{ color: "#334155", textDecoration: "none" }}>Terms of Service</a>
+          © {new Date().getFullYear()} BURE LLC. All rights reserved. · FinOps Financial Center · <a href="/terms" style={{ color: "#334155", textDecoration: "none" }}>Terms of Service</a> · <a href="/disclosures" style={{ color: "#334155", textDecoration: "none" }}>Disclosures</a>
         </div>
       </div>
     </div>

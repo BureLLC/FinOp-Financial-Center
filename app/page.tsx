@@ -350,6 +350,8 @@ export default function IntroPage() {
             <a href="/privacy" style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", textDecoration: "underline", cursor: "pointer" }}>Privacy Policy</a>
             <a href="/contact" style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", textDecoration: "underline", cursor: "pointer" }}>Contact Us</a>
             <a href="/terms" style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", textDecoration: "underline", cursor: "pointer" }}>Terms of Service</a>
+            <span style={{ color: "rgba(255,255,255,0.25)" }}>·</span>
+            <a href="/disclosures" style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", textDecoration: "underline", cursor: "pointer" }}>Disclosures</a>
           </div>
         </div>
       </div>

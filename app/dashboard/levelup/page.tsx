@@ -71,7 +71,7 @@ function TypingIndicator() {
   );
 }
 
-function MessageBubble({ msg }: { msg: Message }) {
+function MessageBubble({ msg, viewport }: { msg: Message; viewport: "mobile" | "tablet" | "desktop" }) {
   const isUser = msg.role === "user";
   return (
     <div style={{ display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", marginBottom: "16px" }}>
@@ -84,7 +84,7 @@ function MessageBubble({ msg }: { msg: Message }) {
         </div>
       )}
       <div style={{
-        maxWidth: "75%",
+        maxWidth: viewport === "mobile" ? "88%" : "75%",
         padding: "12px 16px",
         borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
         background: isUser
@@ -114,11 +114,24 @@ export default function LevelUpPage() {
   const [contextLoading, setContextLoading] = useState(true);
   const [context, setContext] = useState<FinancialContext | null>(null);
   const [activeTopic, setActiveTopic] = useState<string | null>(null);
-  const [conversationId] = useState(() => crypto.randomUUID());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [viewport, setViewport] = useState<"mobile" | "tablet" | "desktop">("desktop");
 
   useEffect(() => { loadContext(); }, []);
+
+  useEffect(() => {
+    const updateViewport = () => {
+      const w = window.innerWidth;
+      if (w < 768) setViewport("mobile");
+      else if (w < 1100) setViewport("tablet");
+      else setViewport("desktop");
+    };
+
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -277,10 +290,10 @@ RULES:
   };
 
   return (
-    <div style={{ maxWidth: "1100px", display: "flex", gap: "24px", alignItems: "flex-start", height: "calc(100vh - 120px)" }}>
+    <div style={{ maxWidth: "1100px", display: "flex", flexDirection: viewport === "desktop" ? "row" : "column", gap: viewport === "mobile" ? "12px" : "20px", alignItems: "stretch", height: viewport === "desktop" ? "calc(100vh - 120px)" : "auto", paddingBottom: viewport === "mobile" ? "92px" : "0" }}>
 
       {/* Left sidebar — context + topics */}
-      <div style={{ width: "260px", flexShrink: 0, display: "flex", flexDirection: "column", gap: "14px" }}>
+      <div style={{ width: viewport === "desktop" ? "260px" : "100%", flexShrink: 0, display: "flex", flexDirection: viewport === "mobile" ? "column" : "row", gap: "12px", overflowX: viewport === "mobile" ? "visible" : "auto" }}>
 
         {/* Financial snapshot */}
         <div style={{ padding: "18px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "14px" }}>
@@ -321,7 +334,7 @@ RULES:
         </div>
 
         {/* Suggested questions */}
-        <div style={{ padding: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "14px", flex: 1, overflowY: "auto" }}>
+        <div style={{ padding: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "14px", flex: 1, overflowY: viewport === "desktop" ? "auto" : "visible", minWidth: viewport === "desktop" ? "0" : "100%" }}>
           <div style={{ fontSize: "10px", fontWeight: 700, color: "#334155", letterSpacing: "0.12em", marginBottom: "10px" }}>SUGGESTED</div>
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
             {SUGGESTED_QUESTIONS.map((q, i) => (
@@ -339,9 +352,9 @@ RULES:
       </div>
 
       {/* Main chat area */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "18px", overflow: "hidden", height: "100%" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "18px", overflow: "hidden", height: viewport === "desktop" ? "100%" : "min(78vh, 760px)", minHeight: viewport === "mobile" ? "560px" : "auto" }}>
         {/* Chat header */}
-        <div style={{ padding: "16px 20px", background: "rgba(37,99,235,0.08)", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: "12px" }}>
+        <div style={{ padding: "16px 20px", background: "rgba(37,99,235,0.08)", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: "12px", flexWrap: viewport === "mobile" ? "wrap" : "nowrap" }}>
           <div style={{ width: "40px", height: "40px", borderRadius: "12px", background: "linear-gradient(135deg, #1e3a5f, #0a1628)", border: "1px solid rgba(56,189,248,0.4)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 20px rgba(37,99,235,0.4)" }}>
             <div style={{ display: "flex", flexDirection: "column", gap: "3px", alignItems: "center" }}>
               <div style={{ display: "flex", gap: "4px" }}>
@@ -383,7 +396,7 @@ RULES:
             </div>
           ) : (
             <>
-              {messages.map((msg, i) => <MessageBubble key={i} msg={msg} />)}
+              {messages.map((msg, i) => <MessageBubble key={i} msg={msg} viewport={viewport} />)}
               {loading && (
                 <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "16px" }}>
                   <div style={{ width: "32px", height: "32px", borderRadius: "10px", background: "linear-gradient(135deg, #1e3a5f, #0a0f1a)", border: "1px solid rgba(56,189,248,0.3)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginRight: "10px", alignSelf: "flex-end" }}>

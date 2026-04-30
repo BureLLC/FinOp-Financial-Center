@@ -30,6 +30,7 @@ const NAV = [
   { group: "SYSTEM", items: [
     { icon: "⚙",  label: "Settings",       path: "/dashboard/settings" },
     { icon: "✉️", label: "Contact Support", path: "/contact" },
+    { icon: "⚖️", label: "Disclosures", path: "/disclosures" },
   ]},
 ];
 

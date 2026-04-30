@@ -136,7 +136,7 @@ export default function ContactPage() {
           {[
             { q: "How do I connect my bank account?", a: "Go to Financial Connections in the dashboard and select your institution." },
             { q: "Is my financial data secure?", a: "Yes. We use AES-256 encryption, MFA, and never store bank credentials." },
-            { q: "How do I cancel my subscription?", a: "Contact us at contact@burellc.com and we'll process your cancellation within 1 business day." },
+            { q: "How do I cancel my subscription?", a: "For App Store and Google Play subscriptions, manage or cancel in your Apple/Google account settings. Refunds follow Apple/Google policies." },
             { q: "I'm having trouble with MFA.", a: "Make sure your phone's time is set to automatic. Open your authenticator app and select the FinOps entry." },
           ].map((item, i, arr) => (
             <div key={i} style={{ marginBottom: i < arr.length - 1 ? "12px" : 0, paddingBottom: i < arr.length - 1 ? "12px" : 0, borderBottom: i < arr.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none" }}>
@@ -153,6 +153,10 @@ export default function ContactPage() {
           <div style={{ display: "flex", gap: "16px", justifyContent: "center" }}>
             <a href="/privacy" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Privacy Policy</a>
             <a href="/terms" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Terms of Service</a>
+ codex/conduct-security-and-architecture-audit-qqgarn
+            <a href="/disclosures" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Disclosures</a>
+
+ main
             <Link href="/" style={{ fontSize: "12px", color: "#38bdf8", textDecoration: "none" }}>Homepage</Link>
           </div>
         </div>
