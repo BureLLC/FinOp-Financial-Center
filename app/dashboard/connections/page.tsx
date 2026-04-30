@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import PlaidConnectButton from "../../components/PlaidConnectButton";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
+import { functionBase } from "../../../src/lib/function-base";
 
 interface Connection {
   id: string;
@@ -141,15 +142,14 @@ export default function ConnectionsPage() {
           "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
           "Authorization": `Bearer ${session.access_token}`,
         };
-        const regRes = await fetch("https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-connect", { method: "POST", headers, body: JSON.stringify({ action: "register" }) });
+        const regRes = await fetch(`${functionBase}/snaptrade-connect`, { method: "POST", headers, body: JSON.stringify({ action: "register" }) });
         const regData = await regRes.json();
         if (!regRes.ok) { setSnapTradeMessage(regData?.error ?? "Failed to register."); setSnapTradeLoading(false); return; }
         const userSecret = regData?.userSecret;
         if (!userSecret) { setSnapTradeMessage("SnapTrade registration incomplete."); setSnapTradeLoading(false); return; }
-        const portalRes = await fetch("https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-connect", { method: "POST", headers, body: JSON.stringify({ action: "portal", userSecret }) });
+        const portalRes = await fetch(`${functionBase}/snaptrade-connect`, { method: "POST", headers, body: JSON.stringify({ action: "portal", userSecret }) });
         const portalData = await portalRes.json();
         if (!portalRes.ok || !portalData?.redirectURL) { setSnapTradeMessage(portalData?.error ?? "Failed to open portal."); setSnapTradeLoading(false); return; }
-        sessionStorage.setItem("snaptrade_user_secret", userSecret);
         window.location.href = portalData.redirectURL;
       } catch { setSnapTradeMessage("Connection error. Please try again."); }
       finally { setSnapTradeLoading(false); }
@@ -163,9 +163,8 @@ export default function ConnectionsPage() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
-      const userSecret = sessionStorage.getItem("snaptrade_user_secret") ?? "";
       const response = await fetch(
-        "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-sync",
+        `${functionBase}/snaptrade-sync`,
         {
           method: "POST",
           headers: {
@@ -173,12 +172,11 @@ export default function ConnectionsPage() {
             "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
             "Authorization": `Bearer ${session.access_token}`,
           },
-          body: JSON.stringify({ authorizationId, userSecret }),
+          body: JSON.stringify({ authorizationId }),
         }
       );
       const data = await response.json();
       if (response.ok) {
-        sessionStorage.removeItem("snaptrade_user_secret");
         setSyncMessage("Brokerage connected successfully!");
         setTimeout(() => { loadData(); setSyncMessage(null); }, 2000);
       } else {
@@ -197,7 +195,7 @@ export default function ConnectionsPage() {
       if (!session) return;
 
       const response = await fetch(
-        "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/orchestrate-refresh",
+        `${functionBase}/orchestrate-refresh`,
         {
           method: "POST",
           headers: {

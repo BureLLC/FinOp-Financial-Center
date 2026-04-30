@@ -1,16 +1,6 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import GlobalLevelUp from "./components/GlobalLevelUp";
 
 export const metadata: Metadata = {
   title: "FinOps Financial Center",
@@ -18,12 +8,10 @@ export const metadata: Metadata = {
   keywords: ["finance", "trading", "crypto", "tax", "budgeting", "AI"],
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
-      <body>{children}</body>
+    <html lang="en">
+      <body>{children}<GlobalLevelUp /></body>
     </html>
   );
 }

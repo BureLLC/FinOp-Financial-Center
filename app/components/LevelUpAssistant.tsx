@@ -41,9 +41,17 @@ function RobotIcon({ size = 22 }: { size?: number }) {
 
 interface Props { pathname: string; }
 
+
+const levelUpState: { openedOnce: boolean; open: boolean; messages: Message[]; lastPopupAt: number | null } = {
+  openedOnce: false,
+  open: false,
+  messages: [],
+  lastPopupAt: null,
+};
+
 export default function LevelUpAssistant({ pathname }: Props) {
-  const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [open, setOpen] = useState(levelUpState.open);
+  const [messages, setMessages] = useState<Message[]>(levelUpState.messages);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [showBubble, setShowBubble] = useState(false);
@@ -58,16 +66,32 @@ export default function LevelUpAssistant({ pathname }: Props) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Show greeting bubble on page change
+  // Controlled auto-popup: once per session, then auto-minimize
   useEffect(() => {
-    setShowBubble(false);
-    const t = setTimeout(() => setShowBubble(true), 2000);
-    return () => clearTimeout(t);
+    if (pathname === "/") return;
+    if (levelUpState.openedOnce) return;
+    setShowBubble(true);
+    const openTimer = setTimeout(() => {
+      setOpen(true);
+      levelUpState.open = true;
+      levelUpState.openedOnce = true;
+      levelUpState.lastPopupAt = Date.now();
+    }, 800);
+    const minimizeTimer = setTimeout(() => {
+      setOpen(false);
+      levelUpState.open = false;
+    }, 18000);
+    return () => { clearTimeout(openTimer); clearTimeout(minimizeTimer); };
   }, [pathname]);
 
   useEffect(() => {
+    levelUpState.messages = messages;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    levelUpState.open = open;
+  }, [open]);
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 100);
@@ -98,7 +122,7 @@ export default function LevelUpAssistant({ pathname }: Props) {
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
           max_tokens: 300,
-          system: `You are LevelUP, a concise AI financial assistant inside FinOps Financial Center. The user is on: ${pathname}. Be brief — max 3 sentences unless asked for more. Be helpful, warm, and financially accurate. Not professional financial advice.`,
+          system: `You are LevelUP, a concise AI financial assistant inside FinOps Financial Center. The user is on: ${pathname}. Be brief — max 3 sentences unless asked for more. Be helpful, warm, and financially accurate. Not professional financial advice. If asked about MFA/security, provide setup steps for authenticator app, backup codes, and recovery best practices. Never suggest bypasses or disabling MFA.`,
           messages: [
             ...messages.map((m) => ({ role: m.role, content: m.content })),
             { role: "user", content: userMsg },
