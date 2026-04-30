@@ -320,24 +320,31 @@ export default function SettingsPage() {
     const userId = user.id;
 
     try {
-      await supabase.from("alerts").delete().eq("user_id", userId);
-      await supabase.from("transactions").delete().eq("user_id", userId);
-      await supabase.from("positions").delete().eq("user_id", userId);
-      await supabase.from("financial_accounts").delete().eq("user_id", userId);
-      await supabase.from("integration_connections").delete().eq("user_id", userId);
-      await supabase.from("tax_estimates").delete().eq("user_id", userId);
-      await supabase.from("tax_profiles").delete().eq("user_id", userId);
-      await supabase.from("trades").delete().eq("user_id", userId);
-      await supabase.from("trading_journal").delete().eq("user_id", userId);
-      await supabase.from("write_offs").delete().eq("user_id", userId);
-      await supabase.from("savings_goals").delete().eq("user_id", userId);
-      await supabase.from("budget_categories").delete().eq("user_id", userId);
-      await supabase.from("user_profiles").delete().eq("id", userId);
+      const checkedDelete = async (table: string, column: string) => {
+        const { error } = await supabase.from(table).delete().eq(column, userId);
+        if (error) throw new Error(`${table}: ${error.message}`);
+      };
+
+      await checkedDelete("alerts", "user_id");
+      await checkedDelete("transactions", "user_id");
+      await checkedDelete("positions", "user_id");
+      await checkedDelete("financial_accounts", "user_id");
+      await checkedDelete("integration_connections", "user_id");
+      await checkedDelete("tax_estimates", "user_id");
+      await checkedDelete("tax_profiles", "user_id");
+      await checkedDelete("trades", "user_id");
+      await checkedDelete("trading_journal", "user_id");
+      await checkedDelete("write_offs", "user_id");
+      await checkedDelete("savings_goals", "user_id");
+      await checkedDelete("budget_categories", "user_id");
+
+      const { error: profileDeleteError } = await supabase.from("user_profiles").delete().eq("id", userId);
+      if (profileDeleteError) throw new Error(`user_profiles: ${profileDeleteError.message}`);
 
       await supabase.auth.signOut();
       window.location.href = "/auth";
-    } catch {
-      setDeleteMsg("Account deletion failed. Please contact support at admin@burellc.com.");
+    } catch (err) {
+      setDeleteMsg(`Account deletion failed: ${err instanceof Error ? err.message : "Unknown error"}. Contact admin@burellc.com if this persists.`);
       setDeleteBusy(false);
     }
   };

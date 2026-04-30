@@ -235,6 +235,7 @@ serve(async (req) => {
 
         const posRecord = {
           user_id: user.id,
+          financial_account_id: financialAccountId,
           provider_account_id: acctId,
           asset_symbol: symbol,
           asset_name: description,
