@@ -51,7 +51,6 @@ export async function cleanupDashboardSeed(userId: string) {
 
 const baseAccountFields = {
   account_currency: "USD",
-  currency: "USD",
   available_balance: 10000,
   iso_currency_code: "USD",
   unofficial_currency_code: null,
