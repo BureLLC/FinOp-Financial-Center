@@ -1,8 +1,8 @@
 # Dashboard Regression Coverage
 
-This branch adds an executable regression-test foundation for the FinOps dashboard.
+This repository now has a staged dashboard regression strategy for launch readiness.
 
-## Scope added
+## Foundation coverage
 
 - Node unit/smoke tests for deterministic financial calculations.
 - Playwright configuration for browser-based dashboard tests.
@@ -18,6 +18,19 @@ This branch adds an executable regression-test foundation for the FinOps dashboa
   - Financial Connections
   - Tax Center
 
+## Mutation-flow coverage
+
+The `dashboard-mutation-flow-tests` branch adds seeded Supabase-backed E2E mutation coverage for:
+
+- Transaction amount edits propagating to Transactions and Summary totals.
+- Deleted transactions being excluded from Transactions and Summary totals.
+- W2/Salary income appearing in income totals while estimated tax remains unchanged by W2 changes.
+- Business/self-employed income and write-offs remaining visible in tax/deduction surfaces.
+- Budget monthly budget, spent, and remaining identity.
+- Savings goal saved/target/active state changes.
+- Investment position values flowing into Investment Portfolio and Summary investments.
+- Connection/account disconnect clearing stale Summary balances.
+
 ## Commands
 
 ```bash
@@ -27,9 +40,23 @@ npm run test:e2e
 npm run test:all
 ```
 
+## Required E2E environment
+
+The full mutation-flow suite requires these environment variables locally or as GitHub Actions secrets:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY
+E2E_SUPABASE_SERVICE_ROLE_KEY
+E2E_TEST_EMAIL
+E2E_TEST_PASSWORD
+```
+
+`E2E_SUPABASE_SERVICE_ROLE_KEY` must only be used in test/CI environments. Do not expose it to client-side app code.
+
 ## Local Playwright setup
 
-After installing dependencies, install the Chromium browser binary once:
+After installing dependencies, install Chromium once:
 
 ```bash
 npx playwright install chromium
@@ -44,20 +71,28 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 Then run the browser test in another terminal:
 
 ```bash
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npx playwright test tests/e2e/dashboard-financial-flows.spec.ts --project=chromium --workers=1 --reporter=line
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 npx playwright test tests/e2e/dashboard-mutation-flows.spec.ts --project=chromium --workers=1 --reporter=line
 ```
 
-## Current limitations
+## CI
 
-The browser coverage currently verifies route reachability, core financial terminology, and obvious invalid-value failures such as `NaN` or `undefined`. It does not yet seed a test database or perform full mutation flows for create/edit/delete/tag operations.
+The dashboard regression workflow runs:
 
-Recommended next coverage layer:
-
-1. Add isolated test fixtures or mocked Supabase responses.
-2. Add stable `data-testid` attributes to financial KPI values.
-3. Add mutation-flow tests for transactions, income tags, budgets, savings, write-offs, investments, and connection refresh behavior.
-4. Add CI workflow steps for `npm ci`, `npm run build`, `npm test`, and `npm run test:e2e`.
+```bash
+npm ci
+npm run build
+npm test
+npx playwright install --with-deps chromium
+npm run test:e2e
+npm run test:all
+```
 
 ## Tax regression guardrails
 
-The unit tests explicitly guard the rule that W2/Salary income is included in total income but excluded from the estimated-tax income base. Self-employed and business income remain the categories that feed estimated-tax responsibility in the smoke model.
+The unit and mutation-flow tests guard the rule that W2/Salary income is included in total income but excluded from estimated-tax changes. Self-employed/business income and business deductions remain covered through the dashboard tax/write-off surfaces.
+
+## Known risks
+
+- The full mutation-flow suite depends on Supabase schema compatibility with seeded test records.
+- If schema columns differ between environments, seed fixtures may need to be adjusted.
+- The selector hydrator is a bridge implementation. Long-term, explicit page-level `data-testid` attributes should replace dynamic assignment.
