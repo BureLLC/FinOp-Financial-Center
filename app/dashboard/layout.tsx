@@ -6,6 +6,7 @@ import Sidebar from "../components/Sidebar";
 import AlertDropdown from "../components/AlertDropdown";
 import UserMenu from "../components/UserMenu";
 import LevelUpAssistant from "../components/LevelUpAssistant";
+import DashboardTestIds from "../components/DashboardTestIds";
 import { createClient } from "../../src/lib/supabase";
 
 type ScreenSize = "mobile" | "tablet" | "desktop";
@@ -57,6 +58,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: "#080b12" }}>
+      <DashboardTestIds />
       {/* Sidebar — desktop and tablet only */}
       {!isMobile && (
         <Sidebar
