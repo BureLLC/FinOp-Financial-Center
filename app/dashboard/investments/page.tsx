@@ -5,6 +5,7 @@ import { getMarketStatus } from "../../../src/lib/marketHours";
 import { createClient } from "../../../src/lib/supabase";
 
 interface Position {
+  financial_account_id: string | null;
   id: string;
   asset_symbol: string;
   asset_name: string;
@@ -324,13 +325,16 @@ export default function InvestmentsPage() {
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+    const { data: snapAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("provider", "snaptrade").eq("is_active", true);
+    const allowed = new Set((snapAccounts ?? []).map((a) => a.id));
+
     const { data } = await supabase
       .from("positions")
-      .select("id, asset_symbol, asset_name, asset_type, calculated_quantity, last_price, last_valuation, total_cost_basis, unrealized_gain, average_cost_basis, is_short, last_price_updated_at")
+      .select("id, financial_account_id, asset_symbol, asset_name, asset_type, calculated_quantity, last_price, last_valuation, total_cost_basis, unrealized_gain, average_cost_basis, is_short, last_price_updated_at")
       .eq("user_id", user.id)
       .is("deleted_at", null)
       .order("last_valuation", { ascending: false, nullsFirst: false });
-    setPositions(data ?? []);
+    setPositions((data ?? []).filter((p) => p.financial_account_id && allowed.has(p.financial_account_id)));
     setLoading(false);
   };
 

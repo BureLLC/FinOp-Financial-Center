@@ -220,6 +220,22 @@ export default function ConnectionsPage() {
     }
   };
 
+
+  const updateConnectionState = async (connectionId: string, mode: "unsync" | "disconnect" | "delete") => {
+    const now = new Date().toISOString();
+    if (mode === "delete") {
+      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
+      await supabase.from("integration_connections").update({ status: "deleted", connection_status: "deleted", sync_status: "never", updated_at: now }).eq("id", connectionId);
+    } else if (mode === "disconnect") {
+      await supabase.from("integration_connections").update({ status: "inactive", connection_status: "disconnected", sync_status: "never", updated_at: now }).eq("id", connectionId);
+      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
+    } else {
+      await supabase.from("integration_connections").update({ sync_status: "never", updated_at: now }).eq("id", connectionId);
+    }
+    setSyncMessage(`${mode} complete. Recalculating totals...`);
+    await loadData();
+  };
+
   const syncStatusBadge = (status: string) => {
     const map: Record<string, { label: string; color: string; bg: string }> = {
       synced:     { label: "Synced",     color: "#22c55e", bg: "rgba(34,197,94,0.1)" },
@@ -492,6 +508,9 @@ export default function ConnectionsPage() {
                     >
                       {syncing ? "Syncing..." : "⟳ Sync Now"}
                     </button>
+                    <button onClick={() => updateConnectionState(conn.id, "unsync")} style={{ padding:"8px 12px", background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.25)", borderRadius:"8px", color:"#f59e0b", fontSize:"12px" }}>Unsync</button>
+                    <button onClick={() => updateConnectionState(conn.id, "disconnect")} style={{ padding:"8px 12px", background:"rgba(239,68,68,0.1)", border:"1px solid rgba(239,68,68,0.25)", borderRadius:"8px", color:"#ef4444", fontSize:"12px" }}>Disconnect</button>
+                    <button onClick={() => updateConnectionState(conn.id, "delete")} style={{ padding:"8px 12px", background:"rgba(127,29,29,0.25)", border:"1px solid rgba(239,68,68,0.35)", borderRadius:"8px", color:"#fca5a5", fontSize:"12px" }}>Delete</button>
                   </div>
 
                   {/* Accounts under this connection */}
