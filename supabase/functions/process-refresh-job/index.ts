@@ -701,6 +701,24 @@ async function upsertTransaction(supabase: any, userId: string, financialAccount
     .eq("provider", "plaid")
     .maybeSingle()
 
+  if (!existing) {
+    const { data: duplicateByFingerprint } = await supabase
+      .from("transactions")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("financial_account_id", financialAccountId)
+      .eq("provider", "plaid")
+      .eq("amount", Math.abs(tx.amount))
+      .eq("transaction_date", new Date(tx.date).toISOString())
+      .eq("description", tx.name ?? null)
+      .limit(1)
+      .maybeSingle()
+
+    if (duplicateByFingerprint) {
+      return
+    }
+  }
+
   if (existing) {
     await supabase
       .from("transactions")

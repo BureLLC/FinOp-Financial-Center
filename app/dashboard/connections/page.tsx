@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import PlaidConnectButton from "../../components/PlaidConnectButton";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
+import { functionBase } from "../../../src/lib/function-base";
 
 interface Connection {
   id: string;
@@ -141,15 +142,14 @@ export default function ConnectionsPage() {
           "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
           "Authorization": `Bearer ${session.access_token}`,
         };
-        const regRes = await fetch("https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-connect", { method: "POST", headers, body: JSON.stringify({ action: "register" }) });
+        const regRes = await fetch(`${functionBase}/snaptrade-connect`, { method: "POST", headers, body: JSON.stringify({ action: "register" }) });
         const regData = await regRes.json();
         if (!regRes.ok) { setSnapTradeMessage(regData?.error ?? "Failed to register."); setSnapTradeLoading(false); return; }
         const userSecret = regData?.userSecret;
         if (!userSecret) { setSnapTradeMessage("SnapTrade registration incomplete."); setSnapTradeLoading(false); return; }
-        const portalRes = await fetch("https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-connect", { method: "POST", headers, body: JSON.stringify({ action: "portal", userSecret }) });
+        const portalRes = await fetch(`${functionBase}/snaptrade-connect`, { method: "POST", headers, body: JSON.stringify({ action: "portal", userSecret }) });
         const portalData = await portalRes.json();
         if (!portalRes.ok || !portalData?.redirectURL) { setSnapTradeMessage(portalData?.error ?? "Failed to open portal."); setSnapTradeLoading(false); return; }
-        sessionStorage.setItem("snaptrade_user_secret", userSecret);
         window.location.href = portalData.redirectURL;
       } catch { setSnapTradeMessage("Connection error. Please try again."); }
       finally { setSnapTradeLoading(false); }
@@ -163,9 +163,8 @@ export default function ConnectionsPage() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
-      const userSecret = sessionStorage.getItem("snaptrade_user_secret") ?? "";
       const response = await fetch(
-        "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/snaptrade-sync",
+        `${functionBase}/snaptrade-sync`,
         {
           method: "POST",
           headers: {
@@ -173,12 +172,11 @@ export default function ConnectionsPage() {
             "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
             "Authorization": `Bearer ${session.access_token}`,
           },
-          body: JSON.stringify({ authorizationId, userSecret }),
+          body: JSON.stringify({ authorizationId }),
         }
       );
       const data = await response.json();
       if (response.ok) {
-        sessionStorage.removeItem("snaptrade_user_secret");
         setSyncMessage("Brokerage connected successfully!");
         setTimeout(() => { loadData(); setSyncMessage(null); }, 2000);
       } else {
@@ -197,7 +195,7 @@ export default function ConnectionsPage() {
       if (!session) return;
 
       const response = await fetch(
-        "https://hxaxmhtkzmfjtaqtcbvk.supabase.co/functions/v1/orchestrate-refresh",
+        `${functionBase}/orchestrate-refresh`,
         {
           method: "POST",
           headers: {
@@ -220,6 +218,22 @@ export default function ConnectionsPage() {
     } finally {
       setSyncing(false);
     }
+  };
+
+
+  const updateConnectionState = async (connectionId: string, mode: "unsync" | "disconnect" | "delete") => {
+    const now = new Date().toISOString();
+    if (mode === "delete") {
+      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
+      await supabase.from("integration_connections").update({ status: "deleted", connection_status: "deleted", sync_status: "never", updated_at: now }).eq("id", connectionId);
+    } else if (mode === "disconnect") {
+      await supabase.from("integration_connections").update({ status: "inactive", connection_status: "disconnected", sync_status: "never", updated_at: now }).eq("id", connectionId);
+      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
+    } else {
+      await supabase.from("integration_connections").update({ sync_status: "never", updated_at: now }).eq("id", connectionId);
+    }
+    setSyncMessage(`${mode} complete. Recalculating totals...`);
+    await loadData();
   };
 
   const syncStatusBadge = (status: string) => {
@@ -494,6 +508,9 @@ export default function ConnectionsPage() {
                     >
                       {syncing ? "Syncing..." : "⟳ Sync Now"}
                     </button>
+                    <button onClick={() => updateConnectionState(conn.id, "unsync")} style={{ padding:"8px 12px", background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.25)", borderRadius:"8px", color:"#f59e0b", fontSize:"12px" }}>Unsync</button>
+                    <button onClick={() => updateConnectionState(conn.id, "disconnect")} style={{ padding:"8px 12px", background:"rgba(239,68,68,0.1)", border:"1px solid rgba(239,68,68,0.25)", borderRadius:"8px", color:"#ef4444", fontSize:"12px" }}>Disconnect</button>
+                    <button onClick={() => updateConnectionState(conn.id, "delete")} style={{ padding:"8px 12px", background:"rgba(127,29,29,0.25)", border:"1px solid rgba(239,68,68,0.35)", borderRadius:"8px", color:"#fca5a5", fontSize:"12px" }}>Delete</button>
                   </div>
 
                   {/* Accounts under this connection */}

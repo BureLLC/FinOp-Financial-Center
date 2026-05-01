@@ -162,8 +162,7 @@ export default function FinancialSummaryPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [snapshotRes, txRes, taxRes, acctRes] = await Promise.all([
-      supabase.from("portfolio_snapshots").select("total_net_worth, total_cash, total_investments, total_liabilities").eq("user_id", user.id).order("snapshot_date", { ascending: false }).limit(1).maybeSingle(),
+    const [txRes, taxRes, acctRes] = await Promise.all([
       supabase.from("transactions").select("direction, amount").eq("user_id", user.id).eq("status", "posted").is("deleted_at", null),
       supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
       supabase.from("financial_accounts").select("id, account_type, account_subtype, current_balance, account_name, institution_name, mask").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null),
@@ -181,7 +180,10 @@ export default function FinancialSummaryPage() {
     const savings = savingsAcct.reduce((s, a) => s + Number(a.current_balance), 0);
     const cd = cdAcct.reduce((s, a) => s + Number(a.current_balance), 0);
     const checking = checkingAcct.reduce((s, a) => s + Number(a.current_balance), 0);
-    const totalLiabilities = Number(snapshotRes.data?.total_liabilities ?? 0);
+    const totalLiabilities = accounts.filter((a) => a.account_type === "credit" || ["loan", "mortgage", "line of credit"].includes((a.account_subtype ?? "").toLowerCase())).reduce((s, a) => s + Math.abs(Number(a.current_balance ?? 0)), 0);
+    const totalCash = accounts.filter((a) => ["depository", "cash"].includes((a.account_type ?? "").toLowerCase()) || ["checking", "savings", "cd"].includes((a.account_subtype ?? "").toLowerCase())).reduce((s, a) => s + Math.max(Number(a.current_balance ?? 0), 0), 0);
+    const totalInvestments = accounts.filter((a) => (a.account_type ?? "").toLowerCase() === "investment").reduce((s, a) => s + Math.max(Number(a.current_balance ?? 0), 0), 0);
+    const netWorth = totalCash + totalInvestments - totalLiabilities;
 
     const debtByType = debtAccounts.map((a) => {
       const style = getDebtColor(a.account_subtype ?? "other");
@@ -194,9 +196,9 @@ export default function FinancialSummaryPage() {
     const paidOffAmount = Math.min(checking + savings, totalLiabilities);
 
     setData({
-      netWorth: Number(snapshotRes.data?.total_net_worth ?? 0),
-      totalCash: Number(snapshotRes.data?.total_cash ?? 0),
-      totalInvestments: Number(snapshotRes.data?.total_investments ?? 0),
+      netWorth,
+      totalCash,
+      totalInvestments,
       totalLiabilities,
       totalIncome,
       totalExpenses,

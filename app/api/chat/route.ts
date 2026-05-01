@@ -29,12 +29,11 @@ export async function POST(req: NextRequest) {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("Anthropic API error:", JSON.stringify(data));
-      console.error("Status:", response.status);
+      console.error("Anthropic API error", { status: response.status, errorType: data?.error?.type ?? "unknown" });
       return NextResponse.json({ 
         error: data?.error?.message ?? "API error",
         status: response.status,
-        details: data 
+        details: { message: data?.error?.message ?? "Upstream API error" } 
       }, { status: response.status });
     }
 
