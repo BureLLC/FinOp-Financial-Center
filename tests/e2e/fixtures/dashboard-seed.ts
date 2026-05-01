@@ -44,18 +44,26 @@ export async function cleanupDashboardSeed(userId: string) {
     try {
       await deleteRowsByUserId(table, userId);
     } catch (error) {
-      // Some environments may not have every optional dashboard table yet.
-      // Surface the warning without hiding failures in the actual test assertions.
       console.warn(error);
     }
   }
 }
+
+const baseAccountFields = {
+  account_currency: "USD",
+  currency: "USD",
+  available_balance: 10000,
+  iso_currency_code: "USD",
+  unofficial_currency_code: null,
+  deleted_at: null,
+};
 
 export async function seedDashboardData(): Promise<DashboardSeed> {
   const user = await ensureE2ETestUser();
   await cleanupDashboardSeed(user.id);
 
   const checking = await insertOne<{ id: string }>("financial_accounts", {
+    ...baseAccountFields,
     user_id: user.id,
     account_name: "E2E Checking",
     account_type: "depository",
@@ -70,11 +78,13 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
   });
 
   const brokerage = await insertOne<{ id: string }>("financial_accounts", {
+    ...baseAccountFields,
     user_id: user.id,
     account_name: "E2E Brokerage",
     account_type: "investment",
     account_subtype: "brokerage",
     current_balance: 0,
+    available_balance: 0,
     institution_name: "E2E Brokerage",
     mask: "0002",
     provider: "snaptrade",
@@ -99,6 +109,7 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
     transaction_date: TEST_DATE,
     provider: "e2e",
     external_transaction_id: "e2e-salary-001",
+    deleted_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
@@ -119,6 +130,7 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
     transaction_date: TEST_DATE,
     provider: "e2e",
     external_transaction_id: "e2e-self-employed-001",
+    deleted_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
@@ -139,6 +151,7 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
     transaction_date: TEST_DATE,
     provider: "e2e",
     external_transaction_id: "e2e-business-001",
+    deleted_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
@@ -159,6 +172,7 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
     transaction_date: TEST_DATE,
     provider: "e2e",
     external_transaction_id: "e2e-expense-001",
+    deleted_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
@@ -250,6 +264,7 @@ export async function seedDashboardData(): Promise<DashboardSeed> {
     unrealized_gain: 200,
     currency: "USD",
     is_short: false,
+    deleted_at: null,
     last_price_updated_at: new Date().toISOString(),
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
