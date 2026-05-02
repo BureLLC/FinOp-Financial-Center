@@ -2,21 +2,23 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
-import { calcTotalIncome, calcTaggedIncome, toNum } from "../../../src/lib/financialCalculations";
+import { activePostedTransactions, calcTotalIncome, calcTaggedIncome, deduplicateTransactions, toNum } from "../../../src/lib/financialCalculations";
 
 interface Transaction {
   id: string;
-  financial_account_id: string;
-  transaction_type: string;
+  financial_account_id?: string;
+  transaction_type?: string;
   direction: string;
-  income_subtype: string | null;
-  amount: number;
-  currency: string;
-  description: string | null;
-  merchant_name: string | null;
-  transaction_date: string;
+  amount: number | string | null;
   status: string;
-  deleted_at: string | null;
+  deleted_at: string | null | undefined;
+  income_subtype?: string | null;
+  currency?: string;
+  description?: string | null;
+  merchant_name?: string | null;
+  transaction_date?: string;
+  external_transaction_id?: string | null;
+  provider?: string | null;
 }
 
 interface Account {
@@ -45,7 +47,7 @@ function fmtCompact(n: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 }).format(n);
 }
 
-function getSubtypeInfo(value: string | null) {
+function getSubtypeInfo(value: string | null | undefined) {
   return INCOME_SUBTYPES.find((s) => s.value === (value ?? "")) ?? INCOME_SUBTYPES[0];
 }
 
@@ -87,21 +89,24 @@ export default function IncomePage() {
     setLoading(false);
   };
 
-  const getAccount = (id: string) => accounts.find((a) => a.id === id);
+  const getAccount = (id?: string) => id ? accounts.find((a) => a.id === id) : undefined;
 
-  const filtered = transactions.filter((tx) => {
+  // Deduplicate transactions before filtering and calculating
+  const deduplicated = deduplicateTransactions(transactions);
+
+  const filtered = deduplicated.filter((tx) => {
     if (filterSubtype === "all") return true;
     if (filterSubtype === "untagged") return !tx.income_subtype;
     return tx.income_subtype === filterSubtype;
   });
 
-  const totalIncome = calcTotalIncome(transactions);
-  const taggedIncome = calcTaggedIncome(transactions);
-  const untaggedCount = transactions.filter((t) => !t.income_subtype).length;
+  const totalIncome = calcTotalIncome(deduplicated);
+  const taggedIncome = calcTaggedIncome(deduplicated);
+  const untaggedCount = deduplicated.filter((t) => !t.income_subtype).length;
 
   // Income by subtype breakdown
   const bySubtype = INCOME_SUBTYPES.slice(1).map((sub) => {
-    const txs = transactions.filter((t) => t.income_subtype === sub.value);
+    const txs = deduplicated.filter((t) => t.income_subtype === sub.value);
     const total = txs.reduce((s, t) => s + Number(t.amount), 0);
     return { ...sub, total, count: txs.length };
   }).filter((s) => s.total > 0);
@@ -273,7 +278,7 @@ export default function IncomePage() {
                     </div>
                     <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
                       <span style={{ fontSize: "11px", color: "#334155" }}>
-                        {new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                        {tx.transaction_date ? new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "No date"}
                       </span>
                       {account && (
                         <span style={{ fontSize: "11px", color: "#1e293b" }}>
@@ -332,7 +337,7 @@ export default function IncomePage() {
               +{fmt(Number(selected.amount))}
             </div>
             <div style={{ fontSize: "12px", color: "#475569", marginTop: "4px" }}>
-              {new Date(selected.transaction_date).toLocaleDateString("en-US", { weekday: "short", month: "long", day: "numeric", year: "numeric" })}
+              {selected.transaction_date ? new Date(selected.transaction_date).toLocaleDateString("en-US", { weekday: "short", month: "long", day: "numeric", year: "numeric" }) : "No date"}
             </div>
           </div>
 

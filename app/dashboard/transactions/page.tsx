@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
-import { activePostedTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
+import { activePostedTransactions, deduplicateTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 
 interface Transaction {
   id: string;
@@ -181,7 +181,10 @@ export default function TransactionsPage() {
 
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
 
-  const filtered = transactions.filter((tx) => {
+  // First deduplicate to prevent showing duplicate synced transactions to the user
+  const deduplicated = deduplicateTransactions(transactions) as Transaction[];
+
+  const filtered = deduplicated.filter((tx) => {
     if (filterDirection !== "all" && tx.direction !== filterDirection) return false;
     if (filterType !== "all" && tx.transaction_type !== filterType) return false;
     if (searchQuery) {
