@@ -202,32 +202,78 @@ export default function TransactionsPage() {
     setSaving(true);
     setPanelMsg(null);
 
+    const updatedFields = {
+      income_subtype: editSubtype || null,
+      transaction_type: editType,
+      category: editCategory || null,
+    };
+    const updates = { ...updatedFields, updated_at: new Date().toISOString() };
+
     const { error } = await supabase
       .from("transactions")
-      .update({
-        income_subtype: editSubtype || null,
-        transaction_type: editType,
-        category: editCategory || null,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updates)
       .eq("id", selected.id);
 
     if (error) {
       setPanelMsg("Failed to save. Please try again.");
-    } else {
-      setPanelMsg("Saved successfully.");
-      setTransactions((prev) =>
-        prev.map((t) =>
-          t.id === selected.id
-            ? { ...t, income_subtype: editSubtype || null, transaction_type: editType, category: editCategory || null }
-            : t
-        )
-      );
-      setSelected((prev) => prev
-        ? { ...prev, income_subtype: editSubtype || null, transaction_type: editType, category: editCategory || null }
-        : null
-      );
+      setSaving(false);
+      return;
     }
+
+    // Update primary transaction in local state
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === selected.id ? { ...t, ...updatedFields } : t))
+    );
+    setSelected((prev) => (prev ? { ...prev, ...updatedFields } : null));
+
+    // Auto-tag all other transactions with the same merchant name (or description fallback)
+    let autoTagCount = 0;
+    const matchKey = selected.merchant_name?.trim().toLowerCase();
+    const descKey = selected.description?.trim().toLowerCase();
+
+    if (matchKey || descKey) {
+      let autoTagged: { id: string }[] | null = null;
+
+      if (matchKey) {
+        const { data } = await supabase
+          .from("transactions")
+          .update(updates)
+          .neq("id", selected.id)
+          .is("deleted_at", null)
+          .ilike("merchant_name", matchKey)
+          .select("id");
+        autoTagged = data;
+      } else if (descKey) {
+        const { data } = await supabase
+          .from("transactions")
+          .update(updates)
+          .neq("id", selected.id)
+          .is("deleted_at", null)
+          .ilike("description", descKey)
+          .select("id");
+        autoTagged = data;
+      }
+
+      autoTagCount = (autoTagged ?? []).length;
+
+      if (autoTagCount > 0) {
+        setTransactions((prev) =>
+          prev.map((t) => {
+            if (t.id === selected.id) return t;
+            const name = t.merchant_name?.trim().toLowerCase();
+            const desc = t.description?.trim().toLowerCase();
+            const matches = matchKey ? name === matchKey : desc === descKey;
+            return matches ? { ...t, ...updatedFields } : t;
+          })
+        );
+      }
+    }
+
+    setPanelMsg(
+      autoTagCount > 0
+        ? `Saved. Also auto-tagged ${autoTagCount} matching transaction${autoTagCount === 1 ? "" : "s"}.`
+        : "Saved successfully."
+    );
     setSaving(false);
   };
 

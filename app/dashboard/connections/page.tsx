@@ -29,6 +29,13 @@ interface Account {
   integration_connection_id: string;
 }
 
+interface ConfirmModal {
+  connectionId: string;
+  mode: "unsync" | "disconnect" | "delete";
+  name: string;
+  accountCount: number;
+}
+
 const PROVIDERS = [
   {
     id: "plaid",
@@ -71,12 +78,14 @@ export default function ConnectionsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [mfaGate, setMfaGate] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [hoveredProvider, setHoveredProvider] = useState<string | null>(null);
   const [showPlaid, setShowPlaid] = useState(false);
   const [snapTradeLoading, setSnapTradeLoading] = useState(false);
   const [snapTradeMessage, setSnapTradeMessage] = useState<string | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModal | null>(null);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   const searchParams = useSearchParams();
 
@@ -99,6 +108,7 @@ export default function ConnectionsPage() {
         .from("integration_connections")
         .select("id, provider, institution_name, status, connection_status, sync_status, last_synced, created_at")
         .eq("user_id", user.id)
+        .neq("status", "deleted")
         .order("created_at", { ascending: false }),
       supabase
         .from("financial_accounts")
@@ -187,7 +197,7 @@ export default function ConnectionsPage() {
 
 
   const handleSync = async (connectionId: string) => {
-    setSyncing(true);
+    setSyncingId(connectionId);
     setSyncMessage(null);
 
     try {
@@ -203,7 +213,7 @@ export default function ConnectionsPage() {
             "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
             "Authorization": `Bearer ${session.access_token}`,
           },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ connectionId }),
         }
       );
 
@@ -216,24 +226,97 @@ export default function ConnectionsPage() {
     } catch {
       setSyncMessage("Sync failed. Please try again.");
     } finally {
-      setSyncing(false);
+      setSyncingId(null);
     }
   };
 
 
   const updateConnectionState = async (connectionId: string, mode: "unsync" | "disconnect" | "delete") => {
+    setConfirmModal(null);
+    setActionLoading(connectionId);
     const now = new Date().toISOString();
-    if (mode === "delete") {
-      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
-      await supabase.from("integration_connections").update({ status: "deleted", connection_status: "deleted", sync_status: "never", updated_at: now }).eq("id", connectionId);
-    } else if (mode === "disconnect") {
-      await supabase.from("integration_connections").update({ status: "inactive", connection_status: "disconnected", sync_status: "never", updated_at: now }).eq("id", connectionId);
-      await supabase.from("financial_accounts").update({ is_active: false, updated_at: now }).eq("integration_connection_id", connectionId);
-    } else {
-      await supabase.from("integration_connections").update({ sync_status: "never", updated_at: now }).eq("id", connectionId);
+
+    try {
+      if (mode === "delete") {
+        // Fetch account IDs for this connection
+        const { data: accts } = await supabase
+          .from("financial_accounts")
+          .select("id")
+          .eq("integration_connection_id", connectionId);
+        const accountIds = (accts ?? []).map((a: { id: string }) => a.id);
+
+        // Cascade soft-delete all transactions belonging to those accounts
+        if (accountIds.length > 0) {
+          await supabase
+            .from("transactions")
+            .update({ deleted_at: now })
+            .in("financial_account_id", accountIds)
+            .is("deleted_at", null);
+        }
+
+        // Soft-delete the accounts themselves
+        await supabase
+          .from("financial_accounts")
+          .update({ is_active: false, deleted_at: now, updated_at: now })
+          .eq("integration_connection_id", connectionId);
+
+        // Mark the connection as deleted
+        await supabase
+          .from("integration_connections")
+          .update({ status: "deleted", connection_status: "deleted", sync_status: "never", updated_at: now })
+          .eq("id", connectionId);
+
+        // Remove from local state immediately
+        setConnections((prev) => prev.filter((c) => c.id !== connectionId));
+        setAccounts((prev) => prev.filter((a) => a.integration_connection_id !== connectionId));
+        setSyncMessage("Connection deleted and transactions removed from your dashboard.");
+      } else if (mode === "disconnect") {
+        await supabase
+          .from("integration_connections")
+          .update({ status: "inactive", connection_status: "disconnected", sync_status: "never", updated_at: now })
+          .eq("id", connectionId);
+        await supabase
+          .from("financial_accounts")
+          .update({ is_active: false, updated_at: now })
+          .eq("integration_connection_id", connectionId);
+
+        setConnections((prev) =>
+          prev.map((c) =>
+            c.id === connectionId
+              ? { ...c, status: "inactive", connection_status: "disconnected", sync_status: "never" }
+              : c
+          )
+        );
+        setAccounts((prev) => prev.filter((a) => a.integration_connection_id !== connectionId));
+        setSyncMessage("Disconnected. New transactions will no longer sync.");
+      } else {
+        await supabase
+          .from("integration_connections")
+          .update({ sync_status: "never", updated_at: now })
+          .eq("id", connectionId);
+
+        setConnections((prev) =>
+          prev.map((c) =>
+            c.id === connectionId ? { ...c, sync_status: "never" } : c
+          )
+        );
+        setSyncMessage("Unsynced. This connection is excluded from calculations.");
+      }
+
+      setTimeout(() => setSyncMessage(null), 4000);
+    } finally {
+      setActionLoading(null);
     }
-    setSyncMessage(`${mode} complete. Recalculating totals...`);
-    await loadData();
+  };
+
+  const openConfirm = (conn: Connection, mode: "unsync" | "disconnect" | "delete") => {
+    const connAccounts = accountsForConnection(conn.id);
+    setConfirmModal({
+      connectionId: conn.id,
+      mode,
+      name: conn.institution_name ?? conn.provider,
+      accountCount: connAccounts.length,
+    });
   };
 
   const syncStatusBadge = (status: string) => {
@@ -401,7 +484,7 @@ export default function ConnectionsPage() {
                   fontSize: "12px", fontWeight: 600,
                   color: `rgba(${provider.rgb},0.9)`,
                 }}>
-                  Connect → 
+                  Connect →
                 </div>
               )}
             </div>
@@ -446,12 +529,16 @@ export default function ConnectionsPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
             {connections.map((conn) => {
               const connAccounts = accountsForConnection(conn.id);
+              const isSyncing = syncingId === conn.id;
+              const isActing = actionLoading === conn.id;
               return (
                 <div key={conn.id} style={{
                   background: "rgba(255,255,255,0.03)",
                   border: "1px solid rgba(255,255,255,0.07)",
                   borderRadius: "14px",
                   overflow: "hidden",
+                  opacity: isActing ? 0.6 : 1,
+                  transition: "opacity 0.2s ease",
                 }}>
                   {/* Connection header */}
                   <div style={{
@@ -490,27 +577,70 @@ export default function ConnectionsPage() {
                       </div>
                     </div>
 
+                    {/* Sync Now */}
                     <button
                       onClick={() => handleSync(conn.id)}
-                      disabled={syncing}
+                      disabled={isSyncing || isActing}
                       style={{
                         padding: "8px 16px",
                         background: "rgba(37,99,235,0.1)",
                         border: "1px solid rgba(37,99,235,0.2)",
                         borderRadius: "8px", color: "#38bdf8",
                         fontSize: "12px", fontWeight: 600,
-                        cursor: syncing ? "not-allowed" : "pointer",
+                        cursor: isSyncing || isActing ? "not-allowed" : "pointer",
                         transition: "all 0.15s ease",
-                        opacity: syncing ? 0.6 : 1,
+                        opacity: isSyncing || isActing ? 0.6 : 1,
                       }}
-                      onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(37,99,235,0.18)"; }}
+                      onMouseEnter={(e) => { if (!isSyncing && !isActing) e.currentTarget.style.background = "rgba(37,99,235,0.18)"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(37,99,235,0.1)"; }}
                     >
-                      {syncing ? "Syncing..." : "⟳ Sync Now"}
+                      {isSyncing ? "Syncing..." : "⟳ Sync Now"}
                     </button>
-                    <button onClick={() => updateConnectionState(conn.id, "unsync")} style={{ padding:"8px 12px", background:"rgba(245,158,11,0.1)", border:"1px solid rgba(245,158,11,0.25)", borderRadius:"8px", color:"#f59e0b", fontSize:"12px" }}>Unsync</button>
-                    <button onClick={() => updateConnectionState(conn.id, "disconnect")} style={{ padding:"8px 12px", background:"rgba(239,68,68,0.1)", border:"1px solid rgba(239,68,68,0.25)", borderRadius:"8px", color:"#ef4444", fontSize:"12px" }}>Disconnect</button>
-                    <button onClick={() => updateConnectionState(conn.id, "delete")} style={{ padding:"8px 12px", background:"rgba(127,29,29,0.25)", border:"1px solid rgba(239,68,68,0.35)", borderRadius:"8px", color:"#fca5a5", fontSize:"12px" }}>Delete</button>
+
+                    {/* Unsync */}
+                    <button
+                      onClick={() => openConfirm(conn, "unsync")}
+                      disabled={isActing}
+                      style={{
+                        padding: "8px 12px",
+                        background: "rgba(245,158,11,0.1)",
+                        border: "1px solid rgba(245,158,11,0.25)",
+                        borderRadius: "8px", color: "#f59e0b",
+                        fontSize: "12px", fontWeight: 500,
+                        cursor: isActing ? "not-allowed" : "pointer",
+                        opacity: isActing ? 0.5 : 1,
+                      }}
+                    >Unsync</button>
+
+                    {/* Disconnect */}
+                    <button
+                      onClick={() => openConfirm(conn, "disconnect")}
+                      disabled={isActing}
+                      style={{
+                        padding: "8px 12px",
+                        background: "rgba(239,68,68,0.1)",
+                        border: "1px solid rgba(239,68,68,0.25)",
+                        borderRadius: "8px", color: "#ef4444",
+                        fontSize: "12px", fontWeight: 500,
+                        cursor: isActing ? "not-allowed" : "pointer",
+                        opacity: isActing ? 0.5 : 1,
+                      }}
+                    >Disconnect</button>
+
+                    {/* Delete */}
+                    <button
+                      onClick={() => openConfirm(conn, "delete")}
+                      disabled={isActing}
+                      style={{
+                        padding: "8px 12px",
+                        background: "rgba(127,29,29,0.25)",
+                        border: "1px solid rgba(239,68,68,0.35)",
+                        borderRadius: "8px", color: "#fca5a5",
+                        fontSize: "12px", fontWeight: 500,
+                        cursor: isActing ? "not-allowed" : "pointer",
+                        opacity: isActing ? 0.5 : 1,
+                      }}
+                    >{isActing ? "Working..." : "Delete"}</button>
                   </div>
 
                   {/* Accounts under this connection */}
@@ -576,6 +706,85 @@ export default function ConnectionsPage() {
               <button onClick={() => setShowPlaid(false)} style={{ width: "28px", height: "28px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "7px", color: "#475569", fontSize: "14px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
             </div>
             <PlaidConnectButton />
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {confirmModal && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 999,
+            background: "rgba(0,0,0,0.75)", backdropFilter: "blur(6px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: "24px",
+          }}
+          onClick={() => setConfirmModal(null)}
+        >
+          <div
+            style={{
+              width: "100%", maxWidth: "420px",
+              background: "rgba(8,11,18,0.99)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: "16px", padding: "28px",
+              boxShadow: "0 24px 80px rgba(0,0,0,0.8)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: "28px", marginBottom: "12px" }}>
+              {confirmModal.mode === "delete" ? "🗑" : confirmModal.mode === "disconnect" ? "🔌" : "⏸"}
+            </div>
+            <h2 style={{ fontSize: "17px", fontWeight: 700, color: "#f8fafc", margin: "0 0 8px" }}>
+              {confirmModal.mode === "delete"
+                ? `Delete ${confirmModal.name}?`
+                : confirmModal.mode === "disconnect"
+                ? `Disconnect ${confirmModal.name}?`
+                : `Unsync ${confirmModal.name}?`}
+            </h2>
+            <p style={{ fontSize: "13px", color: "#64748b", margin: "0 0 24px", lineHeight: 1.6 }}>
+              {confirmModal.mode === "delete"
+                ? `This will permanently remove this connection and soft-delete all ${confirmModal.accountCount > 0 ? `${confirmModal.accountCount} associated account${confirmModal.accountCount === 1 ? "" : "s"} and their ` : ""}transactions from your dashboard. This cannot be undone.`
+                : confirmModal.mode === "disconnect"
+                ? `New transactions will stop syncing. The ${confirmModal.accountCount} connected account${confirmModal.accountCount === 1 ? "" : "s"} will be deactivated. Existing transactions are preserved. You can reconnect later.`
+                : `This connection will be excluded from all calculations (income, expenses, net worth). The connection remains active and can be re-synced at any time.`}
+            </p>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button
+                onClick={() => updateConnectionState(confirmModal.connectionId, confirmModal.mode)}
+                disabled={actionLoading === confirmModal.connectionId}
+                style={{
+                  flex: 1, padding: "11px",
+                  background: confirmModal.mode === "unsync"
+                    ? "rgba(245,158,11,0.12)"
+                    : "rgba(239,68,68,0.12)",
+                  border: `1px solid ${confirmModal.mode === "unsync" ? "rgba(245,158,11,0.35)" : "rgba(239,68,68,0.35)"}`,
+                  borderRadius: "9px",
+                  color: confirmModal.mode === "unsync" ? "#f59e0b" : "#ef4444",
+                  fontSize: "13px", fontWeight: 700,
+                  cursor: actionLoading === confirmModal.connectionId ? "not-allowed" : "pointer",
+                  opacity: actionLoading === confirmModal.connectionId ? 0.6 : 1,
+                }}
+              >
+                {actionLoading === confirmModal.connectionId
+                  ? "Working..."
+                  : confirmModal.mode === "delete"
+                  ? "Yes, Delete"
+                  : confirmModal.mode === "disconnect"
+                  ? "Yes, Disconnect"
+                  : "Yes, Unsync"}
+              </button>
+              <button
+                onClick={() => setConfirmModal(null)}
+                style={{
+                  flex: 1, padding: "11px",
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: "9px", color: "#64748b",
+                  fontSize: "13px", fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >Cancel</button>
+            </div>
           </div>
         </div>
       )}

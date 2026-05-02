@@ -30,6 +30,8 @@ export interface RawTransaction {
   transaction_type?: string;
   category?: string | null;
   transaction_date?: string;
+  external_transaction_id?: string | null;
+  provider?: string | null;
 }
 
 export interface RawAccount {
@@ -73,11 +75,33 @@ export interface RawSavingsGoal {
 // ─── Transaction filters ──────────────────────────────────────────────────────
 
 /**
- * Return only posted, non-deleted transactions.
+ * Remove duplicate transactions caused by the same bank being connected twice.
+ * Deduplication key: provider + external_transaction_id when both are set.
+ * Falls back to tx.id (always unique) so non-deduplicated rows are unaffected.
+ */
+export function deduplicateTransactions(txs: RawTransaction[]): RawTransaction[] {
+  const seen = new Set<string>();
+  const result: RawTransaction[] = [];
+  for (const tx of txs) {
+    const key =
+      tx.external_transaction_id && tx.provider
+        ? `ext:${tx.provider}:${tx.external_transaction_id}`
+        : `id:${tx.id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(tx);
+    }
+  }
+  return result;
+}
+
+/**
+ * Return only posted, non-deleted, deduplicated transactions.
  * This is the canonical set for all financial summaries.
  */
 export function activePostedTransactions(txs: RawTransaction[]): RawTransaction[] {
-  return txs.filter((tx) => tx.status === "posted" && tx.deleted_at == null);
+  const posted = txs.filter((tx) => tx.status === "posted" && tx.deleted_at == null);
+  return deduplicateTransactions(posted);
 }
 
 // ─── Transaction totals ──────────────────────────────────────────────────────
