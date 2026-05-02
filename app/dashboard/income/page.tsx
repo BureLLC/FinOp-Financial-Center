@@ -16,6 +16,7 @@ interface Transaction {
   merchant_name: string | null;
   transaction_date: string;
   status: string;
+  deleted_at: string | null;
 }
 
 interface Account {

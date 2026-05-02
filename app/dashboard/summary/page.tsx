@@ -144,7 +144,7 @@ function AreaChart({ data, color, rgb }: { data: number[]; color: string; rgb: s
   const min = Math.min(...data, 0);
   const range = max - min || 1;
   const w = 400; const h = 90;
-  const pts = data.map((v, i) => ({ x: (i / (data.length - 1)) * w, y: h - ((v - min) / range) * (h - 10) - 5 }));
+  const pts = data.map((v, i) => ({ x: data.length > 1 ? (i / (data.length - 1)) * w : w / 2, y: h - ((v - min) / range) * (h - 10) - 5 }));
   const pathD = pts.map((p, i) => (i === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(" ");
   const areaD = `${pathD} L ${w} ${h} L 0 ${h} Z`;
   const uid = rgb.replace(/,/g, "");
@@ -197,7 +197,8 @@ export default function FinancialSummaryPage() {
       supabase
         .from("positions")
         .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity, last_price")
-        .eq("user_id", user.id),
+        .eq("user_id", user.id)
+        .is("deleted_at", null),
     ]);
 
     const accounts: AccountData[] = acctRes.data ?? [];
