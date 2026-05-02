@@ -283,22 +283,21 @@ export default function TransactionsPage() {
           query = query.ilike("description", descKey);
         }
 
-        const { data } = await query.select("id");
+         const { data } = await query.select("id");
         autoTagCount = (data ?? []).length;
       }
     }
 
-      if (autoTagCount > 0) {
-        setTransactions((prev) =>
-          prev.map((t) => {
-            if (t.id === selected.id) return t;
-            const name = t.merchant_name?.trim().toLowerCase();
-            const desc = t.description?.trim().toLowerCase();
-            const matches = matchKey ? name === matchKey : desc === descKey;
-            return matches ? { ...t, ...updatedFields } : t;
-          })
-        );
-      }
+    if (autoTagCount > 0) {
+      setTransactions((prev) =>
+        prev.map((t) => {
+          if (t.id === selected.id) return t;
+          const name = t.merchant_name?.trim().toLowerCase();
+          const desc = t.description?.trim().toLowerCase();
+          const matches = matchKey ? name === matchKey : desc === descKey;
+          return matches ? { ...t, ...updatedFields } : t;
+        })
+      );
     }
 
     setPanelMsg(
