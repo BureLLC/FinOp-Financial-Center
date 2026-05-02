@@ -32,6 +32,9 @@ export interface RawTransaction {
   transaction_date?: string;
   external_transaction_id?: string | null;
   provider?: string | null;
+  financial_account_id?: string;
+  merchant_name?: string | null;
+  description?: string | null;
 }
 
 export interface RawAccount {
@@ -77,16 +80,26 @@ export interface RawSavingsGoal {
 /**
  * Remove duplicate transactions caused by the same bank being connected twice.
  * Deduplication key: provider + external_transaction_id when both are set.
- * Falls back to tx.id (always unique) so non-deduplicated rows are unaffected.
+ * Falls back to a stable fingerprint based on account, date, amount, merchant, description, direction.
+ * This prevents duplicates from multiple connections to the same institution.
  */
 export function deduplicateTransactions(txs: RawTransaction[]): RawTransaction[] {
   const seen = new Set<string>();
   const result: RawTransaction[] = [];
   for (const tx of txs) {
-    const key =
-      tx.external_transaction_id && tx.provider
-        ? `ext:${tx.provider}:${tx.external_transaction_id}`
-        : `id:${tx.id}`;
+    let key: string;
+    if (tx.external_transaction_id && tx.provider) {
+      key = `ext:${tx.provider}:${tx.external_transaction_id}`;
+    } else {
+      // Fallback dedupe key: normalize fields to handle minor variations
+      const accountId = tx.financial_account_id || "";
+      const date = tx.transaction_date ? new Date(tx.transaction_date).toISOString().split('T')[0] : "";
+      const amount = Math.abs(toNum(tx.amount)).toFixed(2);
+      const merchant = (tx.merchant_name || "").trim().toLowerCase().replace(/\s+/g, ' ');
+      const desc = (tx.description || "").trim().toLowerCase().replace(/\s+/g, ' ');
+      const direction = tx.direction;
+      key = `fp:${accountId}:${date}:${amount}:${merchant}:${desc}:${direction}`;
+    }
     if (!seen.has(key)) {
       seen.add(key);
       result.push(tx);

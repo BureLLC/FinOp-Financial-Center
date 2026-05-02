@@ -24,10 +24,19 @@ function deduplicateTransactions(txs) {
   const seen = new Set();
   const result = [];
   for (const tx of txs) {
-    const key =
-      tx.external_transaction_id && tx.provider
-        ? `ext:${tx.provider}:${tx.external_transaction_id}`
-        : `id:${tx.id}`;
+    let key;
+    if (tx.external_transaction_id && tx.provider) {
+      key = `ext:${tx.provider}:${tx.external_transaction_id}`;
+    } else {
+      // Fallback dedupe key: normalize fields to handle minor variations
+      const accountId = tx.financial_account_id || "";
+      const date = tx.transaction_date ? new Date(tx.transaction_date).toISOString().split('T')[0] : "";
+      const amount = Math.abs(toNum(tx.amount)).toFixed(2);
+      const merchant = (tx.merchant_name || "").trim().toLowerCase().replace(/\s+/g, ' ');
+      const desc = (tx.description || "").trim().toLowerCase().replace(/\s+/g, ' ');
+      const direction = tx.direction;
+      key = `fp:${accountId}:${date}:${amount}:${merchant}:${desc}:${direction}`;
+    }
     if (!seen.has(key)) {
       seen.add(key);
       result.push(tx);
@@ -183,10 +192,10 @@ test("toNum: handles null, undefined, NaN, Infinity, strings", () => {
 
 test("activePostedTransactions: excludes pending and soft-deleted", () => {
   const txs = [
-    { id: "1", status: "posted",  deleted_at: null },
-    { id: "2", status: "pending", deleted_at: null },
-    { id: "3", status: "posted",  deleted_at: "2026-01-01" },
-    { id: "4", status: "posted",  deleted_at: null },
+    { id: "1", status: "posted",  deleted_at: null, amount: 100, direction: "credit" },
+    { id: "2", status: "pending", deleted_at: null, amount: 200, direction: "debit" },
+    { id: "3", status: "posted",  deleted_at: "2026-01-01", amount: 300, direction: "credit" },
+    { id: "4", status: "posted",  deleted_at: null, amount: 400, direction: "debit" },
   ];
   const result = activePostedTransactions(txs);
   assert.equal(result.length, 2);
@@ -524,11 +533,11 @@ test("calcTotalInvestments: net worth investment component equals portfolio tota
 
 test("deduplicateTransactions: removes duplicates by provider+external_transaction_id", () => {
   const txs = [
-    { id: "1", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-abc" },
-    { id: "2", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-abc" }, // duplicate
-    { id: "3", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-xyz" },
-    { id: "4", status: "posted", deleted_at: null, provider: null,    external_transaction_id: null },
-    { id: "5", status: "posted", deleted_at: null, provider: null,    external_transaction_id: null },
+    { id: "1", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-abc", amount: 100, direction: "debit" },
+    { id: "2", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-abc", amount: 100, direction: "debit" }, // duplicate
+    { id: "3", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "ext-xyz", amount: 200, direction: "credit" },
+    { id: "4", status: "posted", deleted_at: null, provider: null,    external_transaction_id: null, amount: 300, direction: "debit" },
+    { id: "5", status: "posted", deleted_at: null, provider: null,    external_transaction_id: null, amount: 400, direction: "credit" },
   ];
   const result = deduplicateTransactions(txs);
   assert.equal(result.length, 4); // id 2 is the duplicate
@@ -537,8 +546,8 @@ test("deduplicateTransactions: removes duplicates by provider+external_transacti
 
 test("deduplicateTransactions: same external_id under different providers are NOT duplicates", () => {
   const txs = [
-    { id: "1", status: "posted", deleted_at: null, provider: "plaid",      external_transaction_id: "ext-123" },
-    { id: "2", status: "posted", deleted_at: null, provider: "snaptrade",   external_transaction_id: "ext-123" },
+    { id: "1", status: "posted", deleted_at: null, provider: "plaid",      external_transaction_id: "ext-123", amount: 100, direction: "debit" },
+    { id: "2", status: "posted", deleted_at: null, provider: "snaptrade",   external_transaction_id: "ext-123", amount: 100, direction: "debit" },
   ];
   const result = deduplicateTransactions(txs);
   assert.equal(result.length, 2);
@@ -546,9 +555,9 @@ test("deduplicateTransactions: same external_id under different providers are NO
 
 test("deduplicateTransactions: preserves first occurrence, drops subsequent duplicates", () => {
   const txs = [
-    { id: "a", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup" },
-    { id: "b", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup" },
-    { id: "c", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup" },
+    { id: "a", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup", amount: 100, direction: "debit" },
+    { id: "b", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup", amount: 100, direction: "debit" },
+    { id: "c", status: "posted", deleted_at: null, provider: "plaid", external_transaction_id: "dup", amount: 100, direction: "debit" },
   ];
   const result = deduplicateTransactions(txs);
   assert.equal(result.length, 1);
@@ -557,25 +566,26 @@ test("deduplicateTransactions: preserves first occurrence, drops subsequent dupl
 
 test("activePostedTransactions: deduplicates same-bank double-connection in one pass", () => {
   const txs = [
-    { id: "1", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-1" },
-    { id: "2", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-1" }, // duplicate
-    { id: "3", status: "pending", deleted_at: null,         provider: "plaid", external_transaction_id: "dup-2" }, // pending
-    { id: "4", status: "posted",  deleted_at: "2026-01-01", provider: "plaid", external_transaction_id: "dup-3" }, // deleted
-    { id: "5", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-4" },
+    { id: "1", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-1", amount: 100, direction: "debit" },
+    { id: "2", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-1", amount: 100, direction: "debit" }, // duplicate
+    { id: "3", status: "pending", deleted_at: null,         provider: "plaid", external_transaction_id: "dup-2", amount: 200, direction: "credit" }, // pending
+    { id: "4", status: "posted",  deleted_at: "2026-01-01", provider: "plaid", external_transaction_id: "dup-3", amount: 300, direction: "debit" }, // deleted
+    { id: "5", status: "posted",  deleted_at: null,         provider: "plaid", external_transaction_id: "dup-4", amount: 400, direction: "credit" },
   ];
   const result = activePostedTransactions(txs);
   assert.equal(result.length, 2);
   assert.deepEqual(result.map((t) => t.id), ["1", "5"]);
 });
 
-test("deduplicateTransactions: no external_id — all rows kept (unique by id)", () => {
+test("deduplicateTransactions: fallback fingerprint dedupes identical transactions", () => {
   const txs = [
-    { id: "x", status: "posted", deleted_at: null, provider: null, external_transaction_id: null },
-    { id: "y", status: "posted", deleted_at: null, provider: null, external_transaction_id: null },
-    { id: "z", status: "posted", deleted_at: null, provider: null, external_transaction_id: null },
+    { id: "x", status: "posted", deleted_at: null, provider: null, external_transaction_id: null, financial_account_id: "acc1", transaction_date: "2023-01-01", amount: 100, merchant_name: "Store", description: "Purchase", direction: "debit" },
+    { id: "y", status: "posted", deleted_at: null, provider: null, external_transaction_id: null, financial_account_id: "acc1", transaction_date: "2023-01-01", amount: 100, merchant_name: "Store", description: "Purchase", direction: "debit" }, // duplicate
+    { id: "z", status: "posted", deleted_at: null, provider: null, external_transaction_id: null, financial_account_id: "acc1", transaction_date: "2023-01-01", amount: 200, merchant_name: "Store", description: "Purchase", direction: "debit" },
   ];
   const result = deduplicateTransactions(txs);
-  assert.equal(result.length, 3);
+  assert.equal(result.length, 2); // y is duplicate of x
+  assert.deepEqual(result.map((t) => t.id), ["x", "z"]);
 });
 
 test("large dataset: no NaN, totals are deterministic", () => {
@@ -586,6 +596,9 @@ test("large dataset: no NaN, totals are deterministic", () => {
     status: "posted",
     deleted_at: null,
     income_subtype: i % 6 === 0 ? "salary" : i % 3 === 0 ? "business" : null,
+    financial_account_id: `acc${i % 10}`, // make them unique
+    transaction_date: `2023-01-${String(i % 28 + 1).padStart(2, '0')}`,
+    merchant_name: `Merchant${i}`, // make unique
   }));
 
   const posted = activePostedTransactions(txs);

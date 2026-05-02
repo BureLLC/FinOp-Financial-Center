@@ -155,16 +155,24 @@ export default function TransactionsPage() {
     const [txRes, acctRes] = await Promise.all([
       supabase
         .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, status, income_subtype, amount, currency, description, merchant_name, category, subcategory, transaction_date, provider, external_transaction_id, deleted_at")
+        .select(`
+          id, financial_account_id, transaction_type, direction, status, income_subtype, 
+          amount, currency, description, merchant_name, category, subcategory, 
+          transaction_date, provider, external_transaction_id, deleted_at,
+          financial_accounts!inner(is_active, deleted_at)
+        `)
         .eq("user_id", user.id)
         .is("deleted_at", null)
+        .eq("financial_accounts.is_active", true)
+        .is("financial_accounts.deleted_at", null)
         .order("transaction_date", { ascending: false })
         .limit(500),
       supabase
         .from("financial_accounts")
         .select("id, account_name, mask, institution_name")
         .eq("user_id", user.id)
-        .eq("is_active", true),
+        .eq("is_active", true)
+        .is("deleted_at", null),
     ]);
     setTransactions(txRes.data ?? []);
     setAccounts(acctRes.data ?? []);
@@ -227,34 +235,58 @@ export default function TransactionsPage() {
     setSelected((prev) => (prev ? { ...prev, ...updatedFields } : null));
 
     // Auto-tag all other transactions with the same merchant name (or description fallback)
+    // Only update transactions that haven't been manually categorized differently
     let autoTagCount = 0;
     const matchKey = selected.merchant_name?.trim().toLowerCase();
     const descKey = selected.description?.trim().toLowerCase();
 
     if (matchKey || descKey) {
-      let autoTagged: { id: string }[] | null = null;
+      // Build filter for transactions that can be auto-tagged
+      const autoTagFilters: any = {
+        neq: { id: selected.id },
+        is: { deleted_at: null },
+      };
 
-      if (matchKey) {
-        const { data } = await supabase
-          .from("transactions")
-          .update(updates)
-          .neq("id", selected.id)
-          .is("deleted_at", null)
-          .ilike("merchant_name", matchKey)
-          .select("id");
-        autoTagged = data;
-      } else if (descKey) {
-        const { data } = await supabase
-          .from("transactions")
-          .update(updates)
-          .neq("id", selected.id)
-          .is("deleted_at", null)
-          .ilike("description", descKey)
-          .select("id");
-        autoTagged = data;
+      // Only auto-tag fields that are being set and where the transaction doesn't already have them set
+      const autoTagUpdates: any = {};
+      if (updatedFields.category != null) {
+        autoTagFilters.is = { ...autoTagFilters.is, category: null };
+        autoTagUpdates.category = updatedFields.category;
+      }
+      if (updatedFields.income_subtype != null) {
+        autoTagFilters.is = { ...autoTagFilters.is, income_subtype: null };
+        autoTagUpdates.income_subtype = updatedFields.income_subtype;
+      }
+      if (updatedFields.transaction_type != null) {
+        autoTagUpdates.transaction_type = updatedFields.transaction_type;
+        // For transaction_type, we might want to always update if it's bank, but let's be conservative
       }
 
-      autoTagCount = (autoTagged ?? []).length;
+      if (Object.keys(autoTagUpdates).length > 0) {
+        let query = supabase.from("transactions").update(autoTagUpdates);
+
+        for (const [key, value] of Object.entries(autoTagFilters)) {
+          if (key === 'neq') {
+            for (const [col, val] of Object.entries(value as any)) {
+              query = query.neq(col, val);
+            }
+          } else if (key === 'is') {
+            for (const [col, val] of Object.entries(value as any)) {
+              query = query.is(col, val);
+            }
+          }
+        }
+
+        if (matchKey) {
+          query = query.ilike("merchant_name", matchKey);
+        } else if (descKey) {
+          query = query.ilike("description", descKey);
+        }
+
+        const { data } = await query.select("id");
+        autoTagCount = (data ?? []).length;
+      }
+    }
 
       if (autoTagCount > 0) {
         setTransactions((prev) =>

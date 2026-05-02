@@ -69,7 +69,7 @@ export default function IncomePage() {
     const [txRes, acctRes] = await Promise.all([
       supabase
         .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, income_subtype, amount, currency, description, merchant_name, transaction_date, status, deleted_at")
+        .select("id, financial_account_id, transaction_type, direction, income_subtype, amount, currency, description, merchant_name, transaction_date, status, deleted_at, external_transaction_id, provider")
         .eq("user_id", user.id)
         .eq("direction", "credit")
         .eq("status", "posted")

@@ -56,13 +56,13 @@ export default function DashboardHome() {
             .eq("is_active", true),
           supabase
             .from("transactions")
-            .select("id, direction, amount, status, deleted_at")
+            .select("id, direction, amount, status, deleted_at, external_transaction_id, provider, financial_account_id, transaction_date, merchant_name, description")
             .eq("user_id", user.id)
             .is("deleted_at", null)
             .eq("status", "posted"),
         ]);
 
-        const totalExpenses = calcTotalOut(txRes.data ?? []);
+        const totalExpenses = calcTotalOut(activePostedTransactions(txRes.data ?? []));
 
         setKpi({
           netWorth: toNum(snapshotRes.data?.total_net_worth),
