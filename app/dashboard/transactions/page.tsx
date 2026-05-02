@@ -155,7 +155,7 @@ export default function TransactionsPage() {
     const [txRes, acctRes] = await Promise.all([
       supabase
         .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, status, income_subtype, amount, currency, description, merchant_name, category, subcategory, transaction_date, provider, external_transaction_id")
+        .select("id, financial_account_id, transaction_type, direction, status, income_subtype, amount, currency, description, merchant_name, category, subcategory, transaction_date, provider, external_transaction_id, deleted_at")
         .eq("user_id", user.id)
         .is("deleted_at", null)
         .order("transaction_date", { ascending: false })
