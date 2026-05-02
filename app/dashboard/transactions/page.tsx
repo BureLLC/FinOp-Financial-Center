@@ -20,6 +20,7 @@ interface Transaction {
   transaction_date: string;
   provider: string | null;
   external_transaction_id: string | null;
+  deleted_at: string | null;
 }
 
 interface Account {
