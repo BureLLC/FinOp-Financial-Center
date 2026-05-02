@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import { activePostedTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 
 interface Transaction {
   id: string;
@@ -182,8 +183,10 @@ export default function TransactionsPage() {
     return true;
   });
 
-  const totalIn = filtered.filter((t) => t.direction === "credit").reduce((s, t) => s + Number(t.amount), 0);
-  const totalOut = filtered.filter((t) => t.direction === "debit").reduce((s, t) => s + Number(t.amount), 0);
+  // Summary totals reflect ALL posted transactions, not just the current filter view.
+  const postedTransactions = activePostedTransactions(transactions);
+  const totalIn = calcTotalIn(postedTransactions);
+  const totalOut = calcTotalOut(postedTransactions);
 
   const openPanel = (tx: Transaction) => {
     setSelected(tx);

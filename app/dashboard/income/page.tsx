@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import { calcTotalIncome, calcTaggedIncome, toNum } from "../../../src/lib/financialCalculations";
 
 interface Transaction {
   id: string;
@@ -67,9 +68,10 @@ export default function IncomePage() {
     const [txRes, acctRes] = await Promise.all([
       supabase
         .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, income_subtype, amount, currency, description, merchant_name, transaction_date, status")
+        .select("id, financial_account_id, transaction_type, direction, income_subtype, amount, currency, description, merchant_name, transaction_date, status, deleted_at")
         .eq("user_id", user.id)
         .eq("direction", "credit")
+        .eq("status", "posted")
         .is("deleted_at", null)
         .order("transaction_date", { ascending: false }),
       supabase
@@ -92,8 +94,8 @@ export default function IncomePage() {
     return tx.income_subtype === filterSubtype;
   });
 
-  const totalIncome = transactions.reduce((s, t) => s + Number(t.amount), 0);
-  const taggedIncome = transactions.filter((t) => t.income_subtype).reduce((s, t) => s + Number(t.amount), 0);
+  const totalIncome = calcTotalIncome(transactions);
+  const taggedIncome = calcTaggedIncome(transactions);
   const untaggedCount = transactions.filter((t) => !t.income_subtype).length;
 
   // Income by subtype breakdown

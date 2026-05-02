@@ -2,6 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import {
+  activePostedTransactions,
+  calcTotalIncome,
+  calcTotalExpenses,
+  calcTotalCash,
+  calcTotalInvestments,
+  calcTotalLiabilities,
+  calcNetWorth,
+  toNum,
+} from "../../../src/lib/financialCalculations";
 
 interface AccountData {
   id: string;
@@ -27,6 +37,8 @@ interface FinancialData {
   accounts: AccountData[];
   debtByType: { label: string; value: number; color: string; rgb: string }[];
   paidOffAmount: number;
+  /** true when investments total came from positions table */
+  investmentsFromPositions: boolean;
 }
 
 function fmt(n: number, compact = false) {
@@ -162,37 +174,69 @@ export default function FinancialSummaryPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [txRes, taxRes, acctRes] = await Promise.all([
-      supabase.from("transactions").select("direction, amount").eq("user_id", user.id).eq("status", "posted").is("deleted_at", null),
-      supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
-      supabase.from("financial_accounts").select("id, account_type, account_subtype, current_balance, account_name, institution_name, mask").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null),
+    const [txRes, taxRes, acctRes, posRes] = await Promise.all([
+      supabase
+        .from("transactions")
+        .select("id, direction, amount, status, deleted_at")
+        .eq("user_id", user.id)
+        .is("deleted_at", null),
+      supabase
+        .from("tax_estimates")
+        .select("total_tax_liability")
+        .eq("user_id", user.id)
+        .eq("period_type", "annual")
+        .order("calculated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("financial_accounts")
+        .select("id, account_type, account_subtype, current_balance, account_name, institution_name, mask")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .is("deleted_at", null),
+      supabase
+        .from("positions")
+        .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity, last_price")
+        .eq("user_id", user.id),
     ]);
 
     const accounts: AccountData[] = acctRes.data ?? [];
-    const totalIncome = (txRes.data ?? []).filter((t) => t.direction === "credit").reduce((s, t) => s + Number(t.amount), 0);
-    const totalExpenses = (txRes.data ?? []).filter((t) => t.direction === "debit").reduce((s, t) => s + Number(t.amount), 0);
+    const positions = posRes.data ?? [];
 
-    const savingsAcct = accounts.filter((a) => a.account_subtype === "savings");
-    const cdAcct = accounts.filter((a) => a.account_subtype === "cd");
-    const checkingAcct = accounts.filter((a) => a.account_subtype === "checking");
-    const debtAccounts = accounts.filter((a) => a.account_type === "credit" || ["loan", "mortgage", "line of credit"].includes(a.account_subtype ?? ""));
+    const posted = activePostedTransactions(txRes.data ?? []);
+    const totalIncome = calcTotalIncome(posted);
+    const totalExpenses = calcTotalExpenses(posted);
 
-    const savings = savingsAcct.reduce((s, a) => s + Number(a.current_balance), 0);
-    const cd = cdAcct.reduce((s, a) => s + Number(a.current_balance), 0);
-    const checking = checkingAcct.reduce((s, a) => s + Number(a.current_balance), 0);
-    const totalLiabilities = accounts.filter((a) => a.account_type === "credit" || ["loan", "mortgage", "line of credit"].includes((a.account_subtype ?? "").toLowerCase())).reduce((s, a) => s + Math.abs(Number(a.current_balance ?? 0)), 0);
-    const totalCash = accounts.filter((a) => ["depository", "cash"].includes((a.account_type ?? "").toLowerCase()) || ["checking", "savings", "cd"].includes((a.account_subtype ?? "").toLowerCase())).reduce((s, a) => s + Math.max(Number(a.current_balance ?? 0), 0), 0);
-    const totalInvestments = accounts.filter((a) => (a.account_type ?? "").toLowerCase() === "investment").reduce((s, a) => s + Math.max(Number(a.current_balance ?? 0), 0), 0);
-    const netWorth = totalCash + totalInvestments - totalLiabilities;
+    const savings = accounts
+      .filter((a) => a.account_subtype === "savings")
+      .reduce((s, a) => s + toNum(a.current_balance), 0);
+    const cd = accounts
+      .filter((a) => a.account_subtype === "cd")
+      .reduce((s, a) => s + toNum(a.current_balance), 0);
+    const checking = accounts
+      .filter((a) => a.account_subtype === "checking")
+      .reduce((s, a) => s + toNum(a.current_balance), 0);
+    const debtAccounts = accounts.filter(
+      (a) => a.account_type === "credit" ||
+        ["loan", "mortgage", "line of credit"].includes(a.account_subtype ?? ""),
+    );
+
+    const totalCash = calcTotalCash(accounts);
+    const totalInvestments = calcTotalInvestments(positions, accounts);
+    const investmentsFromPositions = positions.length > 0 &&
+      positions.reduce((s, p) => s + toNum(p.last_valuation), 0) > 0;
+    const totalLiabilities = calcTotalLiabilities(accounts);
+    const netWorth = calcNetWorth(totalCash, totalInvestments, totalLiabilities);
 
     const debtByType = debtAccounts.map((a) => {
       const style = getDebtColor(a.account_subtype ?? "other");
       const institution = a.institution_name ?? "";
-      const label = institution ? `${institution}${a.mask ? ` ••${a.mask}` : ""}` : `${a.account_subtype ?? "Credit"}${a.mask ? ` ••${a.mask}` : ""}`;
-      return { label, value: Number(a.current_balance), color: style.color, rgb: style.rgb };
+      const label = institution
+        ? `${institution}${a.mask ? ` ••${a.mask}` : ""}`
+        : `${a.account_subtype ?? "Credit"}${a.mask ? ` ••${a.mask}` : ""}`;
+      return { label, value: toNum(a.current_balance), color: style.color, rgb: style.rgb };
     });
 
-    // Paid off = cash available to cover debt
     const paidOffAmount = Math.min(checking + savings, totalLiabilities);
 
     setData({
@@ -202,11 +246,14 @@ export default function FinancialSummaryPage() {
       totalLiabilities,
       totalIncome,
       totalExpenses,
-      estimatedTax: Number(taxRes.data?.total_tax_liability ?? 0),
-      savings, cd, checking,
+      estimatedTax: toNum(taxRes.data?.total_tax_liability),
+      savings,
+      cd,
+      checking,
       accounts,
       debtByType,
       paidOffAmount,
+      investmentsFromPositions,
     });
     setLoading(false);
   };
@@ -252,22 +299,25 @@ export default function FinancialSummaryPage() {
     { label: "CD",      value: data.cd,       color: "#6366f1" },
   ];
 
-  // Mortgage — placeholder (0 if not connected)
+  // Mortgage — 0 if no mortgage account connected
   const mortgageBalance = data.accounts
     .filter((a) => (a.account_subtype ?? "").toLowerCase().includes("mortgage"))
-    .reduce((s, a) => s + Number(a.current_balance), 0);
+    .reduce((s, a) => s + toNum(a.current_balance), 0);
 
-  const monthLabels = ["Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
-  const netWorthTrend = [500, 650, 720, 780, 850, Math.max(data.netWorth, 0)];
-  const expenseTrend = [2000, 3500, 2800, 4200, 3100, data.totalExpenses];
+  // Charts show only the current data point; historical snapshots require a
+  // portfolio_snapshots time-series query (not yet implemented).
+  const currentMonth = new Date().toLocaleDateString("en-US", { month: "short" });
+  const monthLabels = [currentMonth];
+  const netWorthTrend = [Math.max(data.netWorth, 0)];
+  const expenseTrend = [data.totalExpenses];
 
   const barData = [
-    { label: "Nov", value: 2000, color: "#38bdf8", rgb: "56,189,248" },
-    { label: "Dec", value: 3500, color: "#38bdf8", rgb: "56,189,248" },
-    { label: "Jan", value: 2800, color: "#a855f7", rgb: "168,85,247" },
-    { label: "Feb", value: 4200, color: "#38bdf8", rgb: "56,189,248" },
-    { label: "Mar", value: 3100, color: "#a855f7", rgb: "168,85,247" },
-    { label: "Apr", value: data.totalExpenses, color: "#ef4444", rgb: "239,68,68" },
+    {
+      label: currentMonth,
+      value: data.totalExpenses,
+      color: "#ef4444",
+      rgb: "239,68,68",
+    },
   ];
 
   const card = (content: React.ReactNode, style?: React.CSSProperties) => (
