@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { createClient } from "../../src/lib/supabase";
+import { activePostedTransactions, calcTotalOut, toNum } from "../../src/lib/financialCalculations";
 
 interface KPIData {
   netWorth: number;
@@ -55,21 +56,19 @@ export default function DashboardHome() {
             .eq("is_active", true),
           supabase
             .from("transactions")
-            .select("amount")
+            .select("id, direction, amount, status, deleted_at")
             .eq("user_id", user.id)
-            .eq("direction", "debit")
+            .is("deleted_at", null)
             .eq("status", "posted"),
         ]);
 
-        const totalExpenses = (txRes.data ?? []).reduce(
-          (sum, tx) => sum + Number(tx.amount), 0
-        );
+        const totalExpenses = calcTotalOut(txRes.data ?? []);
 
         setKpi({
-          netWorth: Number(snapshotRes.data?.total_net_worth ?? 0),
-          totalCash: Number(snapshotRes.data?.total_cash ?? 0),
+          netWorth: toNum(snapshotRes.data?.total_net_worth),
+          totalCash: toNum(snapshotRes.data?.total_cash),
           totalExpenses,
-          totalInvestments: Number(snapshotRes.data?.total_investments ?? 0),
+          totalInvestments: toNum(snapshotRes.data?.total_investments),
           accountCount: accountsRes.count ?? 0,
           lastSynced: snapshotRes.data?.calculated_at ?? null,
         });

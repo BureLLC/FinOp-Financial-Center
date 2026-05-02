@@ -2,6 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import {
+  DEFAULT_TAX_RATE,
+  calcTotalWriteOffExpenses,
+  calcTotalDeductible,
+  calcTaxSavingsEstimate,
+  toNum,
+} from "../../../src/lib/financialCalculations";
 
 interface WriteOff {
   id: string;
@@ -216,17 +223,15 @@ export default function WriteOffsPage() {
     await loadData();
   };
 
-  // ── Calculations ──────────────────────────────────────────────────────────
+  // ── Calculations (via central module) ───────────────────────────────────
   const filtered = filterType === "all" ? writeOffs : writeOffs.filter((w) => w.deduction_type === filterType);
-  const totalExpenses = writeOffs.reduce((s, w) => s + Number(w.amount), 0);
-  const totalDeductible = writeOffs.reduce((s, w) => {
-    const dt = getDeductionType(w.deduction_type);
-    return s + (Number(w.amount) * dt.pct / 100);
-  }, 0);
+  const totalExpenses = calcTotalWriteOffExpenses(writeOffs);
+  const totalDeductible = calcTotalDeductible(writeOffs, DEDUCTION_TYPES);
+  const taxSavingsEst = calcTaxSavingsEstimate(totalDeductible, DEFAULT_TAX_RATE);
   const verifiedCount = writeOffs.filter((w) => w.is_verified).length;
   const byCategory = DEDUCTION_TYPES.map((dt) => {
     const items = writeOffs.filter((w) => w.deduction_type === dt.value);
-    const total = items.reduce((s, w) => s + Number(w.amount), 0);
+    const total = items.reduce((s, w) => s + toNum(w.amount), 0);
     const deductible = total * dt.pct / 100;
     return { ...dt, total, deductible, count: items.length };
   }).filter((d) => d.total > 0).sort((a, b) => b.total - a.total);
@@ -257,7 +262,7 @@ export default function WriteOffsPage() {
         {[
           { label: "Total Expenses",     value: fmt(totalExpenses),    color: "#ef4444", rgb: "239,68,68",   sub: `${writeOffs.length} entries` },
           { label: "Total Deductible",   value: fmt(totalDeductible),  color: "#22c55e", rgb: "34,197,94",   sub: "After deduction rules" },
-          { label: "Tax Savings Est.",   value: fmt(totalDeductible * 0.25), color: "#38bdf8", rgb: "56,189,248", sub: "At ~25% effective rate" },
+          { label: "Tax Savings Est.",   value: fmt(taxSavingsEst), color: "#38bdf8", rgb: "56,189,248", sub: `At ~${Math.round(DEFAULT_TAX_RATE * 100)}% effective rate` },
           { label: "Verified",           value: `${verifiedCount} / ${writeOffs.length}`, color: "#a855f7", rgb: "168,85,247", sub: "Entries confirmed" },
         ].map((k, i) => (
           <div key={i} style={{ padding: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "12px", position: "relative", overflow: "hidden" }}>

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import { activePostedTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 
 interface Transaction {
   id: string;
@@ -19,6 +20,7 @@ interface Transaction {
   transaction_date: string;
   provider: string | null;
   external_transaction_id: string | null;
+  deleted_at: string | null;
 }
 
 interface Account {
@@ -153,7 +155,7 @@ export default function TransactionsPage() {
     const [txRes, acctRes] = await Promise.all([
       supabase
         .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, status, income_subtype, amount, currency, description, merchant_name, category, subcategory, transaction_date, provider, external_transaction_id")
+        .select("id, financial_account_id, transaction_type, direction, status, income_subtype, amount, currency, description, merchant_name, category, subcategory, transaction_date, provider, external_transaction_id, deleted_at")
         .eq("user_id", user.id)
         .is("deleted_at", null)
         .order("transaction_date", { ascending: false })
@@ -182,8 +184,10 @@ export default function TransactionsPage() {
     return true;
   });
 
-  const totalIn = filtered.filter((t) => t.direction === "credit").reduce((s, t) => s + Number(t.amount), 0);
-  const totalOut = filtered.filter((t) => t.direction === "debit").reduce((s, t) => s + Number(t.amount), 0);
+  // Summary totals reflect ALL posted transactions, not just the current filter view.
+  const postedTransactions = activePostedTransactions(transactions);
+  const totalIn = calcTotalIn(postedTransactions);
+  const totalOut = calcTotalOut(postedTransactions);
 
   const openPanel = (tx: Transaction) => {
     setSelected(tx);
