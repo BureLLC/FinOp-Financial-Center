@@ -17,6 +17,11 @@ import {
   activePostedTransactions,
   deduplicateTransactions,
   RawTransaction,
+  calcTotalCash,
+  calcTotalInvestmentsFromAccounts,
+  calcTotalLiabilities,
+  calcNetWorth,
+  toNum,
 } from "./financialCalculations";
 
 export interface FinancialSnapshot {
@@ -33,6 +38,30 @@ export interface FinancialAccount {
   institution_name: string | null;
   mask: string | null;
   is_active: boolean;
+}
+
+export interface CanonicalAccountBalances {
+  /** Bank checking + savings + CD accounts only */
+  bankCash: number;
+  /** Investment accounts from synced brokerages */
+  investmentAccounts: number;
+  /** Credit cards + loans + mortgages */
+  liabilities: number;
+  /** Bank cash + investment accounts - liabilities */
+  netWorth: number;
+  /** Raw account data for detailed breakdowns */
+  accounts: FinancialAccount[];
+}
+
+export interface CanonicalInvestments {
+  /** Total from investment accounts (synced broker positions) */
+  fromAccounts: number;
+  /** Total from investment positions (detailed holdings) */
+  fromPositions: number;
+  /** Preferred value (positions if available, else accounts) */
+  total: number;
+  /** Raw position data if available */
+  positions: any[];
 }
 
 /**
@@ -170,4 +199,99 @@ export async function getCanonicalDebitTransactions(
     .filter((tx) => tx.transaction_date) // Only include transactions with dates
     .sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime())
     .slice(0, 100);
+}
+
+/**
+ * Canonical Account Balances Layer
+ *
+ * Returns active account balances by account class.
+ * Critical filters enforce at query-time:
+ * - Only from active connected institutions
+ * - Only active (is_active = true) accounts
+ * - Only non-deleted (deleted_at = null) accounts
+ * - No SnapTrade/investment cash mixed into bank cash
+ *
+ * Strictly separates:
+ * - Bank depository (checking, savings, CD)
+ * - Investment accounts (synced brokerages)
+ * - Liabilities (credit, loans, mortgages)
+ *
+ * Usage:
+ *   const balances = await getCanonicalAccountBalances(supabase, userId);
+ *   console.log(`Bank cash: $${balances.bankCash}`);
+ *   console.log(`Investments: $${balances.investmentAccounts}`);
+ */
+export async function getCanonicalAccountBalances(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<CanonicalAccountBalances> {
+  const { accounts } = await getCanonicalTransactions(supabase, userId);
+
+  // Calculate balances using the same logic as financialCalculations.ts
+  // but from the canonical active-account-only dataset
+  const bankCash = calcTotalCash(accounts);
+  const investmentAccounts = calcTotalInvestmentsFromAccounts(accounts);
+  const liabilities = calcTotalLiabilities(accounts);
+  const netWorth = calcNetWorth(bankCash, investmentAccounts, liabilities);
+
+  return {
+    bankCash,
+    investmentAccounts,
+    liabilities,
+    netWorth,
+    accounts,
+  };
+}
+
+/**
+ * Canonical Investment Source
+ *
+ * SnapTrade/Fidelity data flows ONLY through this function.
+ * It returns investment holdings/valuations but NOT transaction income.
+ *
+ * Returns:
+ * - Investment account balances (synced brokerages)
+ * - Investment positions (detailed holdings if available)
+ * - Preferred total (positions if available, else accounts)
+ *
+ * Does NOT return:
+ * - Brokerage cash (unless explicitly labeled)
+ * - Transaction income/expenses
+ * - Bank account cash
+ *
+ * Usage:
+ *   const investments = await getCanonicalInvestments(supabase, userId);
+ *   console.log(`Portfolio value: $${investments.total}`);
+ */
+export async function getCanonicalInvestments(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<CanonicalInvestments> {
+  const [accountsSnapshot, positionsRes] = await Promise.all([
+    getCanonicalAccountBalances(supabase, userId),
+    supabase
+      .from("investment_positions")
+      .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity")
+      .eq("user_id", userId)
+      .is("deleted_at", null),
+  ]);
+
+  const positions = positionsRes.data ?? [];
+  const fromAccounts = accountsSnapshot.investmentAccounts;
+
+  // Calculate total from positions if available
+  let fromPositions = 0;
+  if (positions.length > 0) {
+    fromPositions = positions.reduce((sum: number, p: any) => sum + toNum(p.last_valuation), 0);
+  }
+
+  // Prefer positions if available, fallback to accounts
+  const total = fromPositions > 0 ? fromPositions : fromAccounts;
+
+  return {
+    fromAccounts,
+    fromPositions,
+    total,
+    positions,
+  };
 }

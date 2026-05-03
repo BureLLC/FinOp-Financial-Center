@@ -3,16 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
 import {
-  activePostedTransactions,
   calcTotalIncome,
   calcTotalExpenses,
-  calcTotalCash,
-  calcTotalInvestments,
-  calcTotalLiabilities,
-  calcNetWorth,
   toNum,
 } from "../../../src/lib/financialCalculations";
-import { getCanonicalActivePostedTransactions } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalActivePostedTransactions, getCanonicalAccountBalances, getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
 
 interface AccountData {
   id: string;
@@ -175,9 +170,11 @@ export default function FinancialSummaryPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [postedTransactions, taxRes, acctRes, posRes] = await Promise.all([
-      // Use canonical transaction source for consistency across all pages
+    // Use canonical sources for all financial data
+    const [postedTransactions, balances, investments, taxRes] = await Promise.all([
       getCanonicalActivePostedTransactions(supabase, user.id),
+      getCanonicalAccountBalances(supabase, user.id),
+      getCanonicalInvestments(supabase, user.id),
       supabase
         .from("tax_estimates")
         .select("total_tax_liability")
@@ -186,21 +183,9 @@ export default function FinancialSummaryPage() {
         .order("calculated_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
-      supabase
-        .from("financial_accounts")
-        .select("id, account_type, account_subtype, current_balance, account_name, institution_name, mask")
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .is("deleted_at", null),
-      supabase
-        .from("positions")
-        .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity, last_price")
-        .eq("user_id", user.id)
-        .is("deleted_at", null),
     ]);
 
-    const accounts: AccountData[] = acctRes.data ?? [];
-    const positions = posRes.data ?? [];
+    const accounts: AccountData[] = balances.accounts as AccountData[];
 
     const totalIncome = calcTotalIncome(postedTransactions);
     const totalExpenses = calcTotalExpenses(postedTransactions);
@@ -219,12 +204,11 @@ export default function FinancialSummaryPage() {
         ["loan", "mortgage", "line of credit"].includes(a.account_subtype ?? ""),
     );
 
-    const totalCash = calcTotalCash(accounts);
-    const totalInvestments = calcTotalInvestments(positions, accounts);
-    const investmentsFromPositions = positions.length > 0 &&
-      positions.reduce((s, p) => s + toNum(p.last_valuation), 0) > 0;
-    const totalLiabilities = calcTotalLiabilities(accounts);
-    const netWorth = calcNetWorth(totalCash, totalInvestments, totalLiabilities);
+    const totalCash = balances.bankCash;
+    const totalInvestments = investments.total;
+    const investmentsFromPositions = investments.fromPositions > 0;
+    const totalLiabilities = balances.liabilities;
+    const netWorth = balances.netWorth;
 
     const debtByType = debtAccounts.map((a) => {
       const style = getDebtColor(a.account_subtype ?? "other");
