@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { createClient } from "../../src/lib/supabase";
 import { activePostedTransactions, calcTotalOut, toNum } from "../../src/lib/financialCalculations";
+import { getCanonicalActivePostedTransactions } from "../../src/lib/canonicalFinancialData";
 
 interface KPIData {
   netWorth: number;
@@ -41,7 +42,7 @@ export default function DashboardHome() {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return;
 
-        const [snapshotRes, accountsRes, txRes] = await Promise.all([
+        const [snapshotRes, accountsRes, postedTransactions] = await Promise.all([
           supabase
             .from("portfolio_snapshots")
             .select("total_net_worth, total_cash, total_liabilities, total_investments, calculated_at")
@@ -54,15 +55,11 @@ export default function DashboardHome() {
             .select("id", { count: "exact" })
             .eq("user_id", user.id)
             .eq("is_active", true),
-          supabase
-            .from("transactions")
-            .select("id, direction, amount, status, deleted_at, external_transaction_id, provider, financial_account_id, transaction_date, merchant_name, description")
-            .eq("user_id", user.id)
-            .is("deleted_at", null)
-            .eq("status", "posted"),
+          // Use canonical transaction source for consistency
+          getCanonicalActivePostedTransactions(supabase, user.id),
         ]);
 
-        const totalExpenses = calcTotalOut(activePostedTransactions(txRes.data ?? []));
+        const totalExpenses = calcTotalOut(postedTransactions);
 
         setKpi({
           netWorth: toNum(snapshotRes.data?.total_net_worth),

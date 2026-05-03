@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
 import { functionBase } from "../../../src/lib/function-base";
+import { getCanonicalTaggedIncomeCount } from "../../../src/lib/canonicalFinancialData";
 
 interface TaxEstimate {
   id: string;
@@ -156,7 +157,7 @@ export default function TaxCenterPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [estimatesRes, profileRes, taggedRes, jurisdictionsRes] = await Promise.all([
+    const [estimatesRes, profileRes, taggedCount, jurisdictionsRes] = await Promise.all([
       supabase.from("tax_estimates")
         .select("id, period_type, tax_year, quarter, taxable_income, total_tax_liability, income_tax, capital_gains_tax, self_employment_tax, balance_due, underpayment_flag, calculated_at")
         .eq("user_id", user.id)
@@ -166,9 +167,7 @@ export default function TaxCenterPage() {
       supabase.from("tax_profiles")
         .select("id, profile_name, entity_type, filing_status, tax_year, is_primary, jurisdiction_id, state_jurisdiction_id, state_jurisdiction_id_2")
         .eq("user_id", user.id).eq("is_primary", true).eq("is_active", true).maybeSingle(),
-      supabase.from("transactions")
-        .select("id", { count: "exact" })
-        .eq("user_id", user.id).not("income_subtype", "is", null),
+      getCanonicalTaggedIncomeCount(supabase, user.id),
       supabase.from("jurisdictions")
         .select("id, name, code, jurisdiction_type")
         .order("jurisdiction_type", { ascending: false })
@@ -177,7 +176,7 @@ export default function TaxCenterPage() {
 
     const jData = jurisdictionsRes.data ?? [];
     setEstimates(estimatesRes.data ?? []);
-    setTaggedIncomeCount(taggedRes.count ?? 0);
+    setTaggedIncomeCount(taggedCount);
     setJurisdictions(jData);
 
     const p = profileRes.data ?? null;

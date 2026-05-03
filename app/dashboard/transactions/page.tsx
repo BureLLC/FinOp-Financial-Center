@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
 import { activePostedTransactions, deduplicateTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
+import { getCanonicalDeduplicatedTransactions } from "../../../src/lib/canonicalFinancialData";
 
 interface Transaction {
   id: string;
@@ -152,21 +153,10 @@ export default function TransactionsPage() {
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const [txRes, acctRes] = await Promise.all([
-      supabase
-        .from("transactions")
-        .select(`
-          id, financial_account_id, transaction_type, direction, status, income_subtype, 
-          amount, currency, description, merchant_name, category, subcategory, 
-          transaction_date, provider, external_transaction_id, deleted_at,
-          financial_accounts!inner(is_active, deleted_at)
-        `)
-        .eq("user_id", user.id)
-        .is("deleted_at", null)
-        .eq("financial_accounts.is_active", true)
-        .is("financial_accounts.deleted_at", null)
-        .order("transaction_date", { ascending: false })
-        .limit(500),
+    
+    const [dedupTransactions, acctRes] = await Promise.all([
+      // Use canonical deduplicated source
+      getCanonicalDeduplicatedTransactions(supabase, user.id),
       supabase
         .from("financial_accounts")
         .select("id, account_name, mask, institution_name")
@@ -174,17 +164,16 @@ export default function TransactionsPage() {
         .eq("is_active", true)
         .is("deleted_at", null),
     ]);
-    setTransactions(txRes.data ?? []);
+    
+    setTransactions(dedupTransactions as Transaction[]);
     setAccounts(acctRes.data ?? []);
     setLoading(false);
   };
 
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
 
-  // First deduplicate to prevent showing duplicate synced transactions to the user
-  const deduplicated = deduplicateTransactions(transactions) as Transaction[];
-
-  const filtered = deduplicated.filter((tx) => {
+  // Transactions are already deduplicated from canonical source, filter for UI
+  const filtered = transactions.filter((tx) => {
     if (filterDirection !== "all" && tx.direction !== filterDirection) return false;
     if (filterType !== "all" && tx.transaction_type !== filterType) return false;
     if (searchQuery) {
@@ -195,7 +184,7 @@ export default function TransactionsPage() {
     return true;
   });
 
-  // Summary totals reflect ALL posted transactions, not just the current filter view.
+  // Summary totals: filter to posted, deduplicated transactions for summary only
   const postedTransactions = activePostedTransactions(transactions);
   const totalIn = calcTotalIn(postedTransactions);
   const totalOut = calcTotalOut(postedTransactions);
