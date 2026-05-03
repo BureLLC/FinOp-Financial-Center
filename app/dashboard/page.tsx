@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { createClient } from "../../src/lib/supabase";
-import { activePostedTransactions, calcTotalOut, toNum } from "../../src/lib/financialCalculations";
-import { getCanonicalActivePostedTransactions } from "../../src/lib/canonicalFinancialData";
+import { calcTotalOut } from "../../src/lib/financialCalculations";
+import { getCanonicalActivePostedTransactions, getCanonicalAccountBalances, getCanonicalInvestments } from "../../src/lib/canonicalFinancialData";
 
 interface KPIData {
   netWorth: number;
@@ -42,32 +42,22 @@ export default function DashboardHome() {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return;
 
-        const [snapshotRes, accountsRes, postedTransactions] = await Promise.all([
-          supabase
-            .from("portfolio_snapshots")
-            .select("total_net_worth, total_cash, total_liabilities, total_investments, calculated_at")
-            .eq("user_id", user.id)
-            .order("snapshot_date", { ascending: false })
-            .limit(1)
-            .maybeSingle(),
-          supabase
-            .from("financial_accounts")
-            .select("id", { count: "exact" })
-            .eq("user_id", user.id)
-            .eq("is_active", true),
-          // Use canonical transaction source for consistency
+        // Use canonical sources for all financial data - no stale snapshots
+        const [balances, investments, postedTransactions] = await Promise.all([
+          getCanonicalAccountBalances(supabase, user.id),
+          getCanonicalInvestments(supabase, user.id),
           getCanonicalActivePostedTransactions(supabase, user.id),
         ]);
 
         const totalExpenses = calcTotalOut(postedTransactions);
 
         setKpi({
-          netWorth: toNum(snapshotRes.data?.total_net_worth),
-          totalCash: toNum(snapshotRes.data?.total_cash),
+          netWorth: balances.netWorth,
+          totalCash: balances.bankCash,
           totalExpenses,
-          totalInvestments: toNum(snapshotRes.data?.total_investments),
-          accountCount: accountsRes.count ?? 0,
-          lastSynced: snapshotRes.data?.calculated_at ?? null,
+          totalInvestments: investments.total,
+          accountCount: balances.accounts.length,
+          lastSynced: new Date().toISOString(), // Current timestamp for live data
         });
       } catch (e) {
         console.error(e);
