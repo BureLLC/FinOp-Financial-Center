@@ -172,10 +172,8 @@ export default function TransactionsPage() {
 
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
 
-  // First deduplicate to prevent showing duplicate synced transactions to the user
-  const deduplicated = deduplicateTransactions(transactions) as Transaction[];
-
-  const filtered = deduplicated.filter((tx) => {
+  // Transactions are already deduplicated from canonical source, filter for UI
+  const filtered = transactions.filter((tx) => {
     if (filterDirection !== "all" && tx.direction !== filterDirection) return false;
     if (filterType !== "all" && tx.transaction_type !== filterType) return false;
     if (searchQuery) {
@@ -186,7 +184,7 @@ export default function TransactionsPage() {
     return true;
   });
 
-  // Summary totals reflect ALL posted transactions, not just the current filter view.
+  // Summary totals: filter to posted, deduplicated transactions for summary only
   const postedTransactions = activePostedTransactions(transactions);
   const totalIn = calcTotalIn(postedTransactions);
   const totalOut = calcTotalOut(postedTransactions);

@@ -89,9 +89,6 @@ export default function IncomePage() {
 
   const getAccount = (id?: string) => id ? accounts.find((a) => a.id === id) : undefined;
 
-  // Deduplicate transactions before filtering and calculating
-  const getAccount = (id?: string) => id ? accounts.find((a) => a.id === id) : undefined;
-
   // Transactions are already deduplicated and posted-only from canonical source
   const filtered = transactions.filter((tx) => {
     if (filterSubtype === "all") return true;
