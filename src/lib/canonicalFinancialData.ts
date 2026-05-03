@@ -125,3 +125,49 @@ export async function getCanonicalDeduplicatedTransactions(
   const { transactions } = await getCanonicalTransactions(supabase, userId);
   return deduplicateTransactions(transactions);
 }
+
+/**
+ * Get count of tagged income transactions from canonical source.
+ *
+ * Use this for Tax Center to display count of tagged income transactions.
+ * Ensures Tax Center uses the same active-account filter as other financial pages.
+ *
+ * Usage:
+ *   const count = await getCanonicalTaggedIncomeCount(supabase, userId);
+ */
+export async function getCanonicalTaggedIncomeCount(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<number> {
+  const { transactions } = await getCanonicalTransactions(supabase, userId);
+  const tagged = transactions.filter((tx) => tx.income_subtype);
+  return tagged.length;
+}
+
+/**
+ * Get debit transactions for write-off association from canonical source.
+ *
+ * Use this for Write-Offs page to list debit transactions available for
+ * write-off record association. Ensures consistency with other financial pages.
+ *
+ * Usage:
+ *   const debits = await getCanonicalDebitTransactions(supabase, userId);
+ */
+export async function getCanonicalDebitTransactions(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<Array<{ id: string; description: string | null; amount: number | string; transaction_date: string; direction: string }>> {
+  const { transactions } = await getCanonicalTransactions(supabase, userId);
+  return transactions
+    .filter((tx) => tx.direction === "debit")
+    .map((tx) => ({
+      id: tx.id,
+      description: tx.description ?? null,
+      amount: tx.amount ?? 0,
+      transaction_date: tx.transaction_date ?? "",
+      direction: tx.direction,
+    }))
+    .filter((tx) => tx.transaction_date) // Only include transactions with dates
+    .sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime())
+    .slice(0, 100);
+}

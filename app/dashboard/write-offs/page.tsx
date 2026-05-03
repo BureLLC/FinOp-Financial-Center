@@ -9,6 +9,7 @@ import {
   calcTaxSavingsEstimate,
   toNum,
 } from "../../../src/lib/financialCalculations";
+import { getCanonicalDebitTransactions } from "../../../src/lib/canonicalFinancialData";
 
 interface WriteOff {
   id: string;
@@ -25,8 +26,8 @@ interface WriteOff {
 
 interface Transaction {
   id: string;
-  description: string;
-  amount: number;
+  description: string | null;
+  amount: number | string;
   transaction_date: string;
   direction: string;
 }
@@ -122,23 +123,17 @@ export default function WriteOffsPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [writeOffsRes, txRes] = await Promise.all([
+    const [writeOffsRes, txs] = await Promise.all([
       supabase.from("write_offs")
         .select("id, category, description, amount, expense_date, tax_year, deduction_type, is_verified, notes, transaction_id")
         .eq("user_id", user.id)
         .eq("tax_year", selectedYear)
         .order("expense_date", { ascending: false }),
-      supabase.from("transactions")
-        .select("id, description, amount, transaction_date, direction")
-        .eq("user_id", user.id)
-        .eq("direction", "debit")
-        .is("deleted_at", null)
-        .order("transaction_date", { ascending: false })
-        .limit(100),
+      getCanonicalDebitTransactions(supabase, user.id),
     ]);
 
     setWriteOffs(writeOffsRes.data ?? []);
-    setTransactions(txRes.data ?? []);
+    setTransactions(txs);
     setLoading(false);
   };
 
@@ -462,7 +457,7 @@ export default function WriteOffsPage() {
                   <option value="">No linked transaction</option>
                   {transactions.map((tx) => (
                     <option key={tx.id} value={tx.id}>
-                      {new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })} — {tx.description.substring(0, 40)} — {fmt(tx.amount)}
+                      {new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })} — {(tx.description ?? "").substring(0, 40)} — {fmt(Number(tx.amount))}
                     </option>
                   ))}
                 </select>
