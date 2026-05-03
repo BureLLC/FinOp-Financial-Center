@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
-import { activePostedTransactions, calcTotalIncome, calcTaggedIncome, deduplicateTransactions, toNum } from "../../../src/lib/financialCalculations";
+import { deduplicateTransactions, calcTotalIncome, calcTaggedIncome, toNum } from "../../../src/lib/financialCalculations";
+import { getCanonicalActivePostedTransactions } from "../../../src/lib/canonicalFinancialData";
 
 interface Transaction {
   id: string;
@@ -68,15 +69,9 @@ export default function IncomePage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [txRes, acctRes] = await Promise.all([
-      supabase
-        .from("transactions")
-        .select("id, financial_account_id, transaction_type, direction, income_subtype, amount, currency, description, merchant_name, transaction_date, status, deleted_at, external_transaction_id, provider")
-        .eq("user_id", user.id)
-        .eq("direction", "credit")
-        .eq("status", "posted")
-        .is("deleted_at", null)
-        .order("transaction_date", { ascending: false }),
+    const [postedTransactions, acctRes] = await Promise.all([
+      // Use canonical transaction source - already filters to active accounts, posted status, deduplicated
+      getCanonicalActivePostedTransactions(supabase, user.id),
       supabase
         .from("financial_accounts")
         .select("id, account_name, mask, institution_name")
@@ -84,7 +79,10 @@ export default function IncomePage() {
         .eq("is_active", true),
     ]);
 
-    setTransactions(txRes.data ?? []);
+    // Filter to credit transactions (income only)
+    const incomeTransactions = postedTransactions.filter((tx) => tx.direction === "credit");
+    
+    setTransactions(incomeTransactions);
     setAccounts(acctRes.data ?? []);
     setLoading(false);
   };
@@ -92,21 +90,23 @@ export default function IncomePage() {
   const getAccount = (id?: string) => id ? accounts.find((a) => a.id === id) : undefined;
 
   // Deduplicate transactions before filtering and calculating
-  const deduplicated = deduplicateTransactions(transactions);
+  const getAccount = (id?: string) => id ? accounts.find((a) => a.id === id) : undefined;
 
-  const filtered = deduplicated.filter((tx) => {
+  // Transactions are already deduplicated and posted-only from canonical source
+  const filtered = transactions.filter((tx) => {
     if (filterSubtype === "all") return true;
     if (filterSubtype === "untagged") return !tx.income_subtype;
     return tx.income_subtype === filterSubtype;
   });
 
-  const totalIncome = calcTotalIncome(deduplicated);
-  const taggedIncome = calcTaggedIncome(deduplicated);
-  const untaggedCount = deduplicated.filter((t) => !t.income_subtype).length;
+  // Calculate totals from canonical deduplicated source
+  const totalIncome = calcTotalIncome(transactions);
+  const taggedIncome = calcTaggedIncome(transactions);
+  const untaggedCount = transactions.filter((t) => !t.income_subtype).length;
 
   // Income by subtype breakdown
   const bySubtype = INCOME_SUBTYPES.slice(1).map((sub) => {
-    const txs = deduplicated.filter((t) => t.income_subtype === sub.value);
+    const txs = transactions.filter((t) => t.income_subtype === sub.value);
     const total = txs.reduce((s, t) => s + Number(t.amount), 0);
     return { ...sub, total, count: txs.length };
   }).filter((s) => s.total > 0);

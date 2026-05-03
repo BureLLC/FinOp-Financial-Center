@@ -12,6 +12,7 @@ import {
   calcNetWorth,
   toNum,
 } from "../../../src/lib/financialCalculations";
+import { getCanonicalActivePostedTransactions } from "../../../src/lib/canonicalFinancialData";
 
 interface AccountData {
   id: string;
@@ -174,12 +175,9 @@ export default function FinancialSummaryPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [txRes, taxRes, acctRes, posRes] = await Promise.all([
-      supabase
-        .from("transactions")
-        .select("id, direction, amount, status, deleted_at, external_transaction_id, provider, financial_account_id, transaction_date, merchant_name, description")
-        .eq("user_id", user.id)
-        .is("deleted_at", null),
+    const [postedTransactions, taxRes, acctRes, posRes] = await Promise.all([
+      // Use canonical transaction source for consistency across all pages
+      getCanonicalActivePostedTransactions(supabase, user.id),
       supabase
         .from("tax_estimates")
         .select("total_tax_liability")
@@ -204,9 +202,8 @@ export default function FinancialSummaryPage() {
     const accounts: AccountData[] = acctRes.data ?? [];
     const positions = posRes.data ?? [];
 
-    const posted = activePostedTransactions(txRes.data ?? []);
-    const totalIncome = calcTotalIncome(posted);
-    const totalExpenses = calcTotalExpenses(posted);
+    const totalIncome = calcTotalIncome(postedTransactions);
+    const totalExpenses = calcTotalExpenses(postedTransactions);
 
     const savings = accounts
       .filter((a) => a.account_subtype === "savings")
