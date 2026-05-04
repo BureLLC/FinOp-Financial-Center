@@ -639,3 +639,33 @@ export async function getCanonicalTaxableIncome(
     taxableProfit,
   };
 }
+
+/**
+ * Canonical Budget Savings Source
+ *
+ * Returns all budget categories marked as 'savings' type.
+ * These are user-created savings categories within the budget system.
+ *
+ * Excludes:
+ * - Inactive categories (is_active = false)
+ * - Expense categories
+ * - Income categories
+ * - Deleted budget records
+ *
+ * Usage:
+ *   const savingsCategories = await getCanonicalBudgetSavings(supabase, userId);
+ */
+export async function getCanonicalBudgetSavings(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<any[]> {
+  const res = await supabase
+    .from("budget_categories")
+    .select("id, user_id, name, description, parent_category_id, category_type, monthly_limit, is_active, created_at, updated_at")
+    .eq("user_id", userId)
+    .eq("category_type", "savings")
+    .eq("is_active", true)
+    .order("name", { ascending: true });
+
+  return res.data ?? [];
+}

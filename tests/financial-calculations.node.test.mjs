@@ -770,3 +770,88 @@ test("deductible: non-deductible categories reduce net benefit", () => {
   const totalDeductible = calcTotalDeductible(writeOffs, deductionRules);
   assert.equal(totalDeductible, 750); // 500 + 250
 });
+
+// ─── Trading Realized Gains Tests ──────────────────────────────────────────────
+// Ensures only closed trades with realized gains are included in tax calculations
+
+test("trading: only closed trades with realized_pnl are included", () => {
+  const trades = [
+    { id: "t1", status: "closed", realized_pnl: 1000, exit_date: "2026-03-15" },
+    { id: "t2", status: "open", realized_pnl: null, exit_date: null },
+    { id: "t3", status: "closed", realized_pnl: null, exit_date: null }, // closed but no PNL
+    { id: "t4", status: "closed", realized_pnl: -500, exit_date: "2026-02-20" },
+  ];
+
+  const realizedTrades = trades.filter((t) => t.status === "closed" && t.realized_pnl != null);
+  assert.equal(realizedTrades.length, 2);
+  assert.deepEqual(realizedTrades.map((t) => t.id), ["t1", "t4"]);
+});
+
+test("trading: unrealized gains (open trades) are excluded from tax", () => {
+  const trades = [
+    { id: "t1", status: "open", entry_price: 100, exit_price: null, quantity: 10 }, // unrealized gain
+    { id: "t2", status: "closed", realized_pnl: 500, exit_date: "2026-01-15" },
+  ];
+
+  const realizedGains = trades.filter((t) => t.status === "closed").map((t) => t.realized_pnl).reduce((sum, g) => sum + (g ?? 0), 0);
+  assert.equal(realizedGains, 500);
+});
+
+test("trading: multi-year realized gains are filtered by tax year", () => {
+  const trades = [
+    { id: "t1", status: "closed", realized_pnl: 1000, exit_date: "2025-12-31" },
+    { id: "t2", status: "closed", realized_pnl: 500, exit_date: "2026-01-15" },
+    { id: "t3", status: "closed", realized_pnl: 750, exit_date: "2026-06-20" },
+  ];
+
+  const year2026Gains = trades.filter((t) => {
+    const exitYear = new Date(t.exit_date).getFullYear();
+    return t.status === "closed" && exitYear === 2026;
+  }).map((t) => t.realized_pnl).reduce((sum, g) => sum + (g ?? 0), 0);
+
+  assert.equal(year2026Gains, 1250); // 500 + 750
+});
+
+// ─── Budget Savings Categories Tests ─────────────────────────────────────────
+// Ensures savings-classified budget categories are properly identified
+
+test("budget-savings: category_type='savings' are identified correctly", () => {
+  const categories = [
+    { id: "c1", name: "Emergency Fund", category_type: "savings", is_active: true },
+    { id: "c2", name: "Vacation", category_type: "savings", is_active: true },
+    { id: "c3", name: "Groceries", category_type: "expense", is_active: true },
+    { id: "c4", name: "Archived Savings", category_type: "savings", is_active: false },
+  ];
+
+  const savingsCategories = categories.filter((c) => c.category_type === "savings" && c.is_active);
+  assert.equal(savingsCategories.length, 2);
+  assert.deepEqual(savingsCategories.map((c) => c.id), ["c1", "c2"]);
+});
+
+test("budget-savings: expense categories are excluded from savings rollup", () => {
+  const categories = [
+    { id: "c1", name: "Emergency Fund", category_type: "savings", is_active: true },
+    { id: "c2", name: "Dining", category_type: "expense", is_active: true },
+    { id: "c3", name: "Salary", category_type: "income", is_active: true },
+  ];
+
+  const savingsCount = categories.filter((c) => c.category_type === "savings").length;
+  const expenseCount = categories.filter((c) => c.category_type === "expense").length;
+
+  assert.equal(savingsCount, 1);
+  assert.equal(expenseCount, 1);
+  assert.equal(savingsCount + expenseCount, 2);
+});
+
+test("budget-savings: inactive savings categories do not affect totals", () => {
+  const categories = [
+    { id: "c1", name: "Active Savings", category_type: "savings", monthly_limit: 500, is_active: true },
+    { id: "c2", name: "Old Savings", category_type: "savings", monthly_limit: 1000, is_active: false },
+  ];
+
+  const activeSavings = categories.filter((c) => c.category_type === "savings" && c.is_active);
+  const totalLimit = activeSavings.reduce((sum, c) => sum + (c.monthly_limit ?? 0), 0);
+
+  assert.equal(activeSavings.length, 1);
+  assert.equal(totalLimit, 500);
+});

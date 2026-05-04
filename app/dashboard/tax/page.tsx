@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
 import { functionBase } from "../../../src/lib/function-base";
-import { getCanonicalTaggedIncomeCount, getCanonicalTaxableIncome } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalTaggedIncomeCount, getCanonicalTaxableIncome, getCanonicalRealizedGains } from "../../../src/lib/canonicalFinancialData";
 
 interface TaxEstimate {
   id: string;
@@ -131,6 +131,7 @@ export default function TaxCenterPage() {
   const [taggedIncomeCount, setTaggedIncomeCount] = useState(0);
   const [profileComplete, setProfileComplete] = useState(false);
   const [canonicalTaxableIncome, setCanonicalTaxableIncome] = useState<{ businessIncome: number; deductibleExpenses: number; taxableProfit: number } | null>(null);
+  const [realizedGains, setRealizedGains] = useState<any[]>([]);
 
   // Profile modal
   const [showEditProfile, setShowEditProfile] = useState(false);
@@ -159,7 +160,7 @@ export default function TaxCenterPage() {
     if (!user) return;
 
     const currentYear = new Date().getFullYear();
-    const [estimatesRes, profileRes, taggedCount, jurisdictionsRes, canonicalTaxable] = await Promise.all([
+    const [estimatesRes, profileRes, taggedCount, jurisdictionsRes, canonicalTaxable, gains] = await Promise.all([
       supabase.from("tax_estimates")
         .select("id, period_type, tax_year, quarter, taxable_income, total_tax_liability, income_tax, capital_gains_tax, self_employment_tax, balance_due, underpayment_flag, calculated_at")
         .eq("user_id", user.id)
@@ -175,12 +176,14 @@ export default function TaxCenterPage() {
         .order("jurisdiction_type", { ascending: false })
         .order("name"),
       getCanonicalTaxableIncome(supabase, user.id, currentYear),
+      getCanonicalRealizedGains(supabase, user.id, currentYear),
     ]);
 
     const jData = jurisdictionsRes.data ?? [];
     setEstimates(estimatesRes.data ?? []);
     setTaggedIncomeCount(taggedCount);
     setJurisdictions(jData);
+    setRealizedGains(gains);
 
     const p = profileRes.data ?? null;
     setProfile(p);

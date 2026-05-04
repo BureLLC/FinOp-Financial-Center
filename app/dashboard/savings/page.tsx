@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import { getCanonicalBudgetSavings } from "../../../src/lib/canonicalFinancialData";
 
 interface SavingsGoal {
   id: string;
@@ -82,6 +83,7 @@ function RingProgress({ pct, color, size = 110, strokeWidth = 11 }: {
 export default function SavingsPage() {
   const supabase = useMemo(() => createClient(), []);
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
+  const [budgetSavingsCategories, setBudgetSavingsCategories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedGoal, setSelectedGoal] = useState<SavingsGoal | null>(null);
 
@@ -118,13 +120,17 @@ export default function SavingsPage() {
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { data } = await supabase
-      .from("savings_goals")
-      .select("id, name, description, target_amount, current_amount, cumulative_amount, monthly_target, goal_type, start_date, target_date, last_reset_at, status")
-      .eq("user_id", user.id)
-      .eq("status", "active")
-      .order("created_at", { ascending: false });
-    setGoals(data ?? []);
+    const [goalsRes, budgetSavings] = await Promise.all([
+      supabase
+        .from("savings_goals")
+        .select("id, name, description, target_amount, current_amount, cumulative_amount, monthly_target, goal_type, start_date, target_date, last_reset_at, status")
+        .eq("user_id", user.id)
+        .eq("status", "active")
+        .order("created_at", { ascending: false }),
+      getCanonicalBudgetSavings(supabase, user.id),
+    ]);
+    setGoals(goalsRes.data ?? []);
+    setBudgetSavingsCategories(budgetSavings);
     setLoading(false);
   };
 
