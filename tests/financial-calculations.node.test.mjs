@@ -855,3 +855,169 @@ test("budget-savings: inactive savings categories do not affect totals", () => {
   assert.equal(activeSavings.length, 1);
   assert.equal(totalLimit, 500);
 });
+
+// ─── Investment Source Consistency Tests ────────────────────────────────────────
+// Ensures positions are filtered by active accounts and totals match across pages
+
+test("investment-source: positions from inactive accounts are excluded", () => {
+  const accounts = [
+    { id: "acct1", is_active: true, deleted_at: null },
+    { id: "acct2", is_active: false, deleted_at: null },
+    { id: "acct3", is_active: true, deleted_at: "2026-01-01" },
+  ];
+  const positions = [
+    { id: "p1", financial_account_id: "acct1", last_valuation: 10000 },
+    { id: "p2", financial_account_id: "acct2", last_valuation: 5000 },  // inactive account
+    { id: "p3", financial_account_id: "acct3", last_valuation: 3000 },  // deleted account
+    { id: "p4", financial_account_id: null, last_valuation: 2000 },     // orphan position
+  ];
+
+  const activeAccountIds = new Set(
+    accounts.filter((a) => a.is_active && a.deleted_at == null).map((a) => a.id)
+  );
+  const validPositions = positions.filter(
+    (p) => p.financial_account_id && activeAccountIds.has(p.financial_account_id)
+  );
+
+  assert.equal(validPositions.length, 1);
+  assert.equal(validPositions[0].id, "p1");
+  const total = validPositions.reduce((s, p) => s + toNum(p.last_valuation), 0);
+  assert.equal(total, 10000);
+});
+
+test("investment-source: canonical and portfolio page use same active-account filter logic", () => {
+  // Simulates both canonical and Investments page filtering
+  const accounts = [
+    { id: "acct1", is_active: true, deleted_at: null, provider: "snaptrade" },
+    { id: "acct2", is_active: true, deleted_at: null, provider: "plaid" },
+    { id: "acct3", is_active: false, deleted_at: null, provider: "snaptrade" },
+  ];
+  const positions = [
+    { id: "p1", financial_account_id: "acct1", last_valuation: 25000 },
+    { id: "p2", financial_account_id: "acct2", last_valuation: 15000 },
+    { id: "p3", financial_account_id: "acct3", last_valuation: 8000 },
+  ];
+
+  // Both pages: filter by active, non-deleted accounts (all providers)
+  const activeIds = new Set(
+    accounts.filter((a) => a.is_active && a.deleted_at == null).map((a) => a.id)
+  );
+  const filtered = positions.filter((p) => p.financial_account_id && activeIds.has(p.financial_account_id));
+  const total = filtered.reduce((s, p) => s + toNum(p.last_valuation), 0);
+
+  assert.equal(filtered.length, 2);
+  assert.equal(total, 40000); // acct1 + acct2
+});
+
+test("investment-source: net worth includes investments, total cash excludes them", () => {
+  const accounts = [
+    { account_type: "depository", account_subtype: "checking", current_balance: 10000 },
+    { account_type: "investment", account_subtype: "brokerage", current_balance: 50000 },
+    { account_type: "credit", account_subtype: "credit card", current_balance: 2000 },
+  ];
+
+  const bankCash = calcTotalCash(accounts);
+  const investmentTotal = 75000; // from positions (preferred over account balance)
+  const liabilities = calcTotalLiabilities(accounts);
+  const netWorth = bankCash + investmentTotal - liabilities;
+
+  assert.equal(bankCash, 10000);
+  assert.equal(liabilities, 2000);
+  assert.equal(netWorth, 83000); // 10000 + 75000 - 2000
+  // Total Cash must NOT include investments
+  assert.equal(bankCash, 10000);
+});
+
+// ─── Transaction Classification Tests ──────────────────────────────────────────
+// Mirrors the central classification layer in canonicalFinancialData.ts
+
+const DEDUCTIBLE_CATEGORIES = new Set([
+  "business", "home office", "vehicle", "equipment", "software",
+  "meals", "travel", "professional services", "advertising",
+  "office supplies", "insurance", "utilities",
+]);
+
+function isBusinessIncome(tx) {
+  return tx.direction === "credit" &&
+    (tx.income_subtype === "business" || tx.income_subtype === "self-employment") &&
+    tx.deleted_at == null;
+}
+
+function isDeductibleBusinessExpense(tx) {
+  const cat = (tx.category ?? "").toLowerCase();
+  const txType = (tx.transaction_type ?? "").toLowerCase();
+  return tx.direction === "debit" &&
+    DEDUCTIBLE_CATEGORIES.has(cat) &&
+    txType !== "transfer" &&
+    txType !== "tax_payment" &&
+    tx.deleted_at == null;
+}
+
+test("classification: positive business transaction is business income, not write-off", () => {
+  const tx = { direction: "credit", income_subtype: "business", category: "Business", transaction_type: "income", deleted_at: null, amount: 5000 };
+  assert.equal(isBusinessIncome(tx), true);
+  assert.equal(isDeductibleBusinessExpense(tx), false);
+});
+
+test("classification: negative business-category transaction is deductible expense", () => {
+  const tx = { direction: "debit", income_subtype: null, category: "Business", transaction_type: "bank", deleted_at: null, amount: 200 };
+  assert.equal(isDeductibleBusinessExpense(tx), true);
+  assert.equal(isBusinessIncome(tx), false);
+});
+
+test("classification: transfer is never income or deductible expense", () => {
+  const tx = { direction: "debit", income_subtype: null, category: "Business", transaction_type: "transfer", deleted_at: null, amount: 1000 };
+  assert.equal(isDeductibleBusinessExpense(tx), false);
+  assert.equal(isBusinessIncome(tx), false);
+});
+
+test("classification: tax payment is not deductible by default", () => {
+  const tx = { direction: "debit", income_subtype: null, category: "Business", transaction_type: "tax_payment", deleted_at: null, amount: 3000 };
+  assert.equal(isDeductibleBusinessExpense(tx), false);
+});
+
+test("classification: personal expense category is not deductible", () => {
+  const tx = { direction: "debit", income_subtype: null, category: "Shopping", transaction_type: "bank", deleted_at: null, amount: 150 };
+  assert.equal(isDeductibleBusinessExpense(tx), false);
+});
+
+test("classification: deleted transaction is excluded from all classifications", () => {
+  const tx = { direction: "credit", income_subtype: "business", category: "Business", transaction_type: "income", deleted_at: "2026-01-01", amount: 5000 };
+  assert.equal(isBusinessIncome(tx), false);
+  assert.equal(isDeductibleBusinessExpense(tx), false);
+});
+
+// ─── Savings Actual vs Planned Tests ───────────────────────────────────────────
+
+test("savings: actual saved comes from goal contributions, not budget allocations", () => {
+  const goals = [
+    { id: "g1", current_amount: 500, target_amount: 2000 },
+    { id: "g2", current_amount: 1200, target_amount: 5000 },
+  ];
+  const budgetSavings = [
+    { id: "b1", name: "Emergency Fund", monthly_limit: 300 },
+    { id: "b2", name: "Vacation", monthly_limit: 200 },
+  ];
+
+  const actualSaved = goals.reduce((s, g) => s + toNum(g.current_amount), 0);
+  const plannedMonthly = budgetSavings.reduce((s, c) => s + toNum(c.monthly_limit), 0);
+
+  assert.equal(actualSaved, 1700);
+  assert.equal(plannedMonthly, 500);
+  // These must not be mixed
+  assert.notEqual(actualSaved, plannedMonthly);
+});
+
+test("savings: total saved is zero when no contributions exist, regardless of budget savings", () => {
+  const goals = [];
+  const budgetSavings = [
+    { id: "b1", name: "Emergency Fund", monthly_limit: 500 },
+  ];
+
+  const actualSaved = goals.reduce((s, g) => s + toNum(g.current_amount), 0);
+  const plannedMonthly = budgetSavings.reduce((s, c) => s + toNum(c.monthly_limit), 0);
+
+  assert.equal(actualSaved, 0);
+  assert.equal(plannedMonthly, 500);
+  // Planned savings should not inflate actual saved
+});

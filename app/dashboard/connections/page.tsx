@@ -549,12 +549,12 @@ export default function ConnectionsPage() {
                   }}>
                     <div style={{
                       width: "42px", height: "42px",
-                      background: "rgba(56,189,248,0.1)",
-                      border: "1px solid rgba(56,189,248,0.2)",
+                      background: conn.provider === "snaptrade" ? "rgba(34,197,94,0.1)" : "rgba(56,189,248,0.1)",
+                      border: `1px solid ${conn.provider === "snaptrade" ? "rgba(34,197,94,0.2)" : "rgba(56,189,248,0.2)"}`,
                       borderRadius: "11px",
                       display: "flex", alignItems: "center", justifyContent: "center",
                       fontSize: "20px", flexShrink: 0,
-                    }}>🏦</div>
+                    }}>{conn.provider === "snaptrade" ? "📈" : "🏦"}</div>
 
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: "15px", fontWeight: 700, color: "#f8fafc", marginBottom: "3px" }}>
@@ -562,7 +562,7 @@ export default function ConnectionsPage() {
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                         <span style={{ fontSize: "11px", color: "#334155", textTransform: "capitalize" }}>
-                          via {conn.provider}
+                          {conn.provider === "snaptrade" ? "Brokerage" : "Bank"} · via {conn.provider}
                         </span>
                         <span style={{ color: "#1e293b" }}>·</span>
                         {syncStatusBadge(conn.sync_status)}
