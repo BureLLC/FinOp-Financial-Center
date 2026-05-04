@@ -432,3 +432,240 @@ export async function getCanonicalNetWorth(
     accounts: balances.accounts,
   };
 }
+
+/**
+ * Canonical Transaction-Based Write-Offs Source
+ *
+ * Auto-generates write-off entries from transactions tagged as
+ * business/self-employment expenses that are deductible.
+ *
+ * Returns eligible deductible transactions that could become write-offs,
+ * excluding:
+ * - personal expenses
+ * - non-deductible categories
+ * - deleted transactions
+ * - transactions from disconnected/inactive accounts
+ *
+ * Usage:
+ *   const txWriteOffs = await getCanonicalTransactionBasedWriteOffs(supabase, userId, taxYear);
+ */
+export async function getCanonicalTransactionBasedWriteOffs(
+  supabase: SupabaseClient,
+  userId: string,
+  taxYear: number
+): Promise<RawTransaction[]> {
+  const { transactions } = await getCanonicalTransactions(supabase, userId);
+
+  // Filter to business/self-employment expense transactions (debit only)
+  // that are posted, not deleted, from active accounts
+  const deductibleExpenses = activePostedTransactions(transactions).filter(
+    (tx) =>
+      tx.direction === "debit" &&
+      (tx.income_subtype === "business" || tx.income_subtype === "self-employment") &&
+      tx.deleted_at == null &&
+      tx.transaction_date
+  );
+
+  // Filter to transactions in the requested tax year
+  return deductibleExpenses.filter((tx) => {
+    const txYear = tx.transaction_date ? new Date(tx.transaction_date).getFullYear() : 0;
+    return txYear === taxYear;
+  });
+}
+
+/**
+ * Canonical Combined Write-Offs Source
+ *
+ * Returns both manual and transaction-based write-offs for a given tax year.
+ * Combines:
+ * - Manual write-off entries from write_offs table
+ * - Auto-eligible transaction-based write-offs from business expenses
+ *
+ * Usage:
+ *   const allWriteOffs = await getCanonicalCombinedWriteOffs(supabase, userId, taxYear);
+ */
+export async function getCanonicalCombinedWriteOffs(
+  supabase: SupabaseClient,
+  userId: string,
+  taxYear: number
+): Promise<{
+  manual: RawWriteOff[];
+  transactionBased: RawTransaction[];
+  combined: Array<RawWriteOff | RawTransaction>;
+  totalAmount: number;
+  totalDeductible: number;
+}> {
+  const [manualRes, txBased] = await Promise.all([
+    supabase
+      .from("write_offs")
+      .select("id, amount, deduction_type, is_verified, tax_year, expense_date")
+      .eq("user_id", userId)
+      .eq("tax_year", taxYear),
+    getCanonicalTransactionBasedWriteOffs(supabase, userId, taxYear),
+  ]);
+
+  const manual: RawWriteOff[] = manualRes.data ?? [];
+
+  // Deduction rates
+  const deductionRates: Record<string, number> = {
+    home_office: 100,
+    vehicle: 100,
+    equipment: 100,
+    software: 100,
+    meals: 50,
+    travel: 100,
+    marketing: 100,
+    professional: 100,
+    education: 100,
+    other: 100,
+  };
+
+  // For transaction-based, default to "other" category (100% deductible) if not specified
+  const combined = [...manual, ...txBased];
+
+  // Calculate totals
+  let totalAmount = 0;
+  let totalDeductible = 0;
+
+  for (const item of combined) {
+    const amount = toNum(item.amount);
+    totalAmount += amount;
+
+    if ("deduction_type" in item) {
+      // Manual write-off
+      const rate = deductionRates[item.deduction_type] ?? 100;
+      totalDeductible += amount * (rate / 100);
+    } else {
+      // Transaction-based - assume 100% deductible (user already tagged as business)
+      totalDeductible += amount;
+    }
+  }
+
+  return {
+    manual,
+    transactionBased: txBased,
+    combined,
+    totalAmount,
+    totalDeductible,
+  };
+}
+
+/**
+ * Canonical Realized Gains Source
+ *
+ * Returns closed/realized trading positions with gains/losses.
+ * Filters to closed positions only (not open/unrealized).
+ *
+ * Does NOT include unrealized gains which should not be taxed.
+ *
+ * Usage:
+ *   const realized = await getCanonicalRealizedGains(supabase, userId, taxYear);
+ */
+export async function getCanonicalRealizedGains(
+  supabase: SupabaseClient,
+  userId: string,
+  taxYear: number
+): Promise<any[]> {
+  const res = await supabase
+    .from("trades")
+    .select("id, symbol, entry_price, exit_price, quantity, entry_date, exit_date, realized_pnl, notes, status")
+    .eq("user_id", userId)
+    .eq("status", "closed") // Only closed/realized
+    .not("exit_date", "is", null)
+    .order("exit_date", { ascending: false });
+
+  const trades = res.data ?? [];
+
+  // Filter to transactions in the requested tax year
+  return trades.filter((t) => {
+    const exitYear = t.exit_date ? new Date(t.exit_date).getFullYear() : 0;
+    return exitYear === taxYear;
+  });
+}
+
+/**
+ * Canonical Taxable Income Source
+ *
+ * Calculates taxable business income as:
+ * Business Taxable Profit = Business Income - Deductible Business Expenses
+ *
+ * Includes:
+ * - Tagged business/self-employment income transactions
+ * - Minus manual write-offs
+ * - Minus transaction-based deductible expenses
+ *
+ * Excludes:
+ * - Personal expenses
+ * - Non-deductible expenses
+ * - Transfers
+ * - Deleted transactions
+ * - Transactions from disconnected/inactive accounts
+ * - Pending transactions (uses posted only)
+ *
+ * Usage:
+ *   const taxable = await getCanonicalTaxableIncome(supabase, userId, taxYear);
+ */
+export async function getCanonicalTaxableIncome(
+  supabase: SupabaseClient,
+  userId: string,
+  taxYear: number
+): Promise<{
+  businessIncome: number;
+  deductibleExpenses: number;
+  taxableProfit: number;
+}> {
+  const [postedTxs, writeOffs] = await Promise.all([
+    getCanonicalActivePostedTransactions(supabase, userId),
+    getCanonicalCombinedWriteOffs(supabase, userId, taxYear),
+  ]);
+
+  // Filter to business/rental/other income (deductible income types)
+  const deductibleIncomeTypes = new Set(["business", "rental", "other"]);
+  const businessIncome = postedTxs
+    .filter(
+      (tx) =>
+        tx.direction === "credit" &&
+        deductibleIncomeTypes.has(tx.income_subtype ?? "") &&
+        tx.deleted_at == null
+    )
+    .reduce((sum, tx) => sum + toNum(tx.amount), 0);
+
+  const deductibleExpenses = writeOffs.totalDeductible;
+  const taxableProfit = Math.max(businessIncome - deductibleExpenses, 0);
+
+  return {
+    businessIncome,
+    deductibleExpenses,
+    taxableProfit,
+  };
+}
+
+/**
+ * Canonical Budget Savings Source
+ *
+ * Returns all budget categories marked as 'savings' type.
+ * These are user-created savings categories within the budget system.
+ *
+ * Excludes:
+ * - Inactive categories (is_active = false)
+ * - Expense categories
+ * - Income categories
+ * - Deleted budget records
+ *
+ * Usage:
+ *   const savingsCategories = await getCanonicalBudgetSavings(supabase, userId);
+ */
+export async function getCanonicalBudgetSavings(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<any[]> {
+  const res = await supabase
+    .from("budget_categories")
+    .select("id, user_id, name, description, parent_category_id, category_type, monthly_limit, is_active, created_at, updated_at")
+    .eq("user_id", userId)
+    .eq("category_type", "savings")
+    .eq("is_active", true)
+    .order("name", { ascending: true });
+
+  return res.data ?? [];
+}
