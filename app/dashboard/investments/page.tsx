@@ -356,8 +356,8 @@ export default function InvestmentsPage() {
     if (!user) return;
 
     const { data: acct } = await supabase.from("financial_accounts")
-      .select("id").eq("user_id", user.id).eq("is_active", true).limit(1).maybeSingle();
-    if (!acct) { setAddMsg("No connected account found. Please connect a brokerage first."); setAddSaving(false); return; }
+      .select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null).eq("account_type", "investment").limit(1).maybeSingle();
+    if (!acct) { setAddMsg("No investment account found. Please connect a brokerage first."); setAddSaving(false); return; }
 
     const qty = Number(newQty);
     const price = Number(newPrice);

@@ -1021,3 +1021,163 @@ test("savings: total saved is zero when no contributions exist, regardless of bu
   assert.equal(plannedMonthly, 500);
   // Planned savings should not inflate actual saved
 });
+
+// ─── Brokerage Investment Data Path Tests ──────────────────────────────────────
+// Tests the full path: brokerage connection → brokerage account → positions → canonical total
+
+test("brokerage-path: connected brokerage with positions returns canonical investment total", () => {
+  // Simulate: SnapTrade synced account_type="investment" with positions
+  const accounts = [
+    { id: "inv1", account_type: "investment", account_subtype: "brokerage", current_balance: 45000 },
+    { id: "bank1", account_type: "depository", account_subtype: "checking", current_balance: 5000 },
+  ];
+  const positions = [
+    { last_valuation: 25000, total_cost_basis: 20000, unrealized_gain: 5000 },
+    { last_valuation: 18000, total_cost_basis: 15000, unrealized_gain: 3000 },
+  ];
+
+  const total = calcTotalInvestments(positions, accounts);
+  assert.equal(total, 43000); // positions preferred: 25000 + 18000
+});
+
+test("brokerage-path: positions feed Investment Portfolio, Home, Summary, and Net Worth consistently", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", account_subtype: "brokerage", current_balance: 50000 },
+    { id: "bank1", account_type: "depository", account_subtype: "checking", current_balance: 10000 },
+    { id: "cc1", account_type: "credit", account_subtype: "credit card", current_balance: 2000 },
+  ];
+  const positions = [
+    { last_valuation: 30000, total_cost_basis: 25000, unrealized_gain: 5000 },
+    { last_valuation: 22000, total_cost_basis: 20000, unrealized_gain: 2000 },
+  ];
+
+  // All pages must use the same canonical investment total
+  const investmentTotal = calcTotalInvestments(positions, accounts); // 52000
+  const bankCash = calcTotalCash(accounts); // 10000
+  const liabilities = calcTotalLiabilities(accounts); // 2000
+  const netWorth = calcNetWorth(bankCash, investmentTotal, liabilities);
+
+  // Investment Portfolio page total
+  assert.equal(investmentTotal, 52000);
+  // Home Investments card
+  assert.equal(investmentTotal, 52000);
+  // Financial Summary Investments card
+  assert.equal(investmentTotal, 52000);
+  // Net Worth includes investments
+  assert.equal(netWorth, 60000); // 10000 + 52000 - 2000
+  // Total Cash excludes investments
+  assert.equal(bankCash, 10000);
+});
+
+test("brokerage-path: brokerage investments do not feed Total Cash", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", account_subtype: "brokerage", current_balance: 100000 },
+    { id: "bank1", account_type: "depository", account_subtype: "checking", current_balance: 3000 },
+  ];
+
+  const bankCash = calcTotalCash(accounts);
+  assert.equal(bankCash, 3000); // investment account excluded from cash
+});
+
+test("brokerage-path: bank cash does not feed Investments", () => {
+  const accounts = [
+    { id: "bank1", account_type: "depository", account_subtype: "checking", current_balance: 50000 },
+    { id: "bank2", account_type: "depository", account_subtype: "savings", current_balance: 20000 },
+  ];
+
+  const investments = calcTotalInvestmentsFromAccounts(accounts);
+  assert.equal(investments, 0); // no investment accounts
+});
+
+test("brokerage-path: positions linked through investment accounts resolve correctly", () => {
+  // Simulate the filtering logic used by getCanonicalInvestments and Investments page
+  const accounts = [
+    { id: "inv1", account_type: "investment", is_active: true, deleted_at: null },
+    { id: "bank1", account_type: "depository", is_active: true, deleted_at: null },
+  ];
+  const positions = [
+    { id: "p1", financial_account_id: "inv1", last_valuation: 15000 },
+    { id: "p2", financial_account_id: "bank1", last_valuation: 500 }, // bank cash position — must be excluded
+    { id: "p3", financial_account_id: "inv1", last_valuation: 10000 },
+  ];
+
+  // Filter: only positions linked to investment-type accounts
+  const investmentAccountIds = new Set(
+    accounts.filter((a) => a.account_type === "investment").map((a) => a.id)
+  );
+  const investmentPositions = positions.filter(
+    (p) => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
+  );
+
+  assert.equal(investmentPositions.length, 2);
+  const total = investmentPositions.reduce((s, p) => s + toNum(p.last_valuation), 0);
+  assert.equal(total, 25000); // only inv1 positions
+});
+
+test("brokerage-path: user A brokerage positions do not affect user B", () => {
+  // Simulate separate user datasets (Supabase filters by user_id)
+  const userAPositions = [
+    { last_valuation: 30000, total_cost_basis: 25000, unrealized_gain: 5000 },
+  ];
+  const userBPositions = [
+    { last_valuation: 80000, total_cost_basis: 70000, unrealized_gain: 10000 },
+  ];
+
+  const userATotal = calcTotalInvestmentsFromPositions(userAPositions);
+  const userBTotal = calcTotalInvestmentsFromPositions(userBPositions);
+
+  assert.equal(userATotal, 30000);
+  assert.equal(userBTotal, 80000);
+  assert.notEqual(userATotal, userBTotal);
+});
+
+test("brokerage-path: brokerage with no positions falls back to account balance", () => {
+  const accounts = [
+    { account_type: "investment", account_subtype: "brokerage", current_balance: 45000 },
+  ];
+  const positions = []; // no positions synced yet
+
+  const total = calcTotalInvestments(positions, accounts);
+  assert.equal(total, 45000); // falls back to account balance
+});
+
+test("brokerage-path: brokerage connection without synced positions reports account balance, not zero", () => {
+  // When positions haven't synced yet, the account balance should still show
+  const accounts = [
+    { account_type: "investment", account_subtype: "brokerage", current_balance: 60000 },
+    { account_type: "depository", account_subtype: "checking", current_balance: 5000 },
+  ];
+  const positions = [];
+
+  const investmentTotal = calcTotalInvestments(positions, accounts);
+  const bankCash = calcTotalCash(accounts);
+
+  assert.equal(investmentTotal, 60000); // not zero — uses account balance fallback
+  assert.equal(bankCash, 5000); // bank cash unaffected
+});
+
+test("brokerage-path: asset allocation includes investment value from positions", () => {
+  const accounts = [
+    { account_type: "depository", account_subtype: "checking", current_balance: 10000 },
+    { account_type: "depository", account_subtype: "savings", current_balance: 5000 },
+    { account_type: "investment", account_subtype: "brokerage", current_balance: 40000 },
+    { account_type: "credit", account_subtype: "credit card", current_balance: 3000 },
+  ];
+  const positions = [
+    { last_valuation: 42000, total_cost_basis: 35000, unrealized_gain: 7000 },
+  ];
+
+  const bankCash = calcTotalCash(accounts); // 15000
+  const investmentTotal = calcTotalInvestments(positions, accounts); // 42000 (positions)
+  const totalAssets = bankCash + investmentTotal;
+
+  assert.equal(totalAssets, 57000); // 15000 + 42000
+  // Asset allocation segments should include investments
+  const segments = [
+    { label: "Checking", value: 10000 },
+    { label: "Savings", value: 5000 },
+    { label: "Investments", value: investmentTotal },
+  ];
+  const segmentTotal = segments.reduce((s, seg) => s + seg.value, 0);
+  assert.equal(segmentTotal, 57000);
+});

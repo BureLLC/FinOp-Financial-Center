@@ -245,11 +245,16 @@ export default function ConnectionsPage() {
           .eq("integration_connection_id", connectionId);
         const accountIds = (accts ?? []).map((a: { id: string }) => a.id);
 
-        // Cascade soft-delete all transactions belonging to those accounts
+        // Cascade soft-delete all transactions and positions belonging to those accounts
         if (accountIds.length > 0) {
           await supabase
             .from("transactions")
             .update({ deleted_at: now })
+            .in("financial_account_id", accountIds)
+            .is("deleted_at", null);
+          await supabase
+            .from("positions")
+            .update({ deleted_at: now, updated_at: now })
             .in("financial_account_id", accountIds)
             .is("deleted_at", null);
         }
