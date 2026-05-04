@@ -1,5 +1,4 @@
-[project]
-id = "hxaxmhtkzmfjtaqtcbvk"
+project_id = "hxaxmhtkzmfjtaqtcbvk"
 
 [functions.orchestrate-refresh]
 verify_jwt = true
