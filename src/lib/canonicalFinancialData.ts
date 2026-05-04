@@ -105,6 +105,18 @@ export type InvestmentDataStatus =
   | "missing_positions"     // Brokerage account exists but no positions and no usable balance
   | "no_brokerage_connection"; // No investment/brokerage accounts found at all
 
+export interface BrokerageAccountBreakdown {
+  accountId: string;
+  accountName: string;
+  institutionName: string | null;
+  mask: string | null;
+  positionsCount: number;
+  positionsValue: number;
+  balanceValue: number;
+  /** "positions" = positions used; "fallback" = balance used; "missing" = neither */
+  valueSource: "positions" | "fallback" | "missing";
+}
+
 export interface CanonicalInvestments {
   /** Total investment value (positions if available, else fallback balance) */
   totalInvestmentValue: number;
@@ -126,6 +138,8 @@ export interface CanonicalInvestments {
   dataStatus: InvestmentDataStatus;
   /** Warnings for consumers to log or display */
   warnings: string[];
+  /** Per-account breakdown for Investment Portfolio page and diagnostics */
+  perAccountBreakdown: BrokerageAccountBreakdown[];
   /** Raw position data if available */
   positions: any[];
 
@@ -377,7 +391,7 @@ export async function getCanonicalInvestments(
     // Only fetch investment-type accounts (not bank/depository/credit)
     supabase
       .from("financial_accounts")
-      .select("id, account_type")
+      .select("id, account_type, account_name, institution_name, mask, current_balance")
       .eq("user_id", userId)
       .eq("is_active", true)
       .is("deleted_at", null)
@@ -392,9 +406,9 @@ export async function getCanonicalInvestments(
   const investmentAccounts = investmentAcctsRes.data ?? [];
   const investmentAccountIds = new Set(investmentAccounts.map((a: any) => a.id));
 
-  // Only include positions linked to active investment accounts
-  // This excludes cash positions from bank/depository accounts (e.g. Plaid cash sync)
-  // which belong in Total Cash, not Investments
+  // Only include positions linked to active investment accounts.
+  // This excludes cash positions from bank/depository accounts (Plaid cash)
+  // which belong in Total Cash, not Investments.
   const positions = (positionsRes.data ?? []).filter(
     (p: any) => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
   );
@@ -403,33 +417,57 @@ export async function getCanonicalInvestments(
   const accountsWithPositionIds = new Set(
     positions.map((p: any) => p.financial_account_id)
   );
+
+  // Group positions by account for per-account value calculation
+  const positionsByAccount = new Map<string, number>();
+  const positionsCountByAccount = new Map<string, number>();
+  for (const p of positions) {
+    const aid = (p as any).financial_account_id;
+    positionsByAccount.set(aid, (positionsByAccount.get(aid) ?? 0) + toNum((p as any).last_valuation));
+    positionsCountByAccount.set(aid, (positionsCountByAccount.get(aid) ?? 0) + 1);
+  }
+
   const brokerageAccountCount = investmentAccounts.length;
   let brokerageAccountsWithPositions = 0;
   let brokerageAccountsUsingFallback = 0;
   let brokerageAccountsMissingPositions = 0;
+  const perAccountBreakdown: BrokerageAccountBreakdown[] = [];
 
   for (const acct of investmentAccounts) {
-    if (accountsWithPositionIds.has(acct.id)) {
+    const acctAny = acct as any;
+    const acctBalance = toNum(acctAny.current_balance);
+    const acctPositionsValue = positionsByAccount.get(acctAny.id) ?? 0;
+    const acctPositionsCount = positionsCountByAccount.get(acctAny.id) ?? 0;
+
+    let valueSource: "positions" | "fallback" | "missing";
+    if (accountsWithPositionIds.has(acctAny.id)) {
       brokerageAccountsWithPositions++;
+      valueSource = "positions";
+    } else if (acctBalance > 0) {
+      brokerageAccountsUsingFallback++;
+      valueSource = "fallback";
     } else {
-      // No positions for this account — check if balance is usable as fallback
-      const acctBalance = (accountsSnapshot.accounts ?? []).find(
-        (a: any) => a.id === acct.id
-      );
-      const bal = toNum(acctBalance?.current_balance);
-      if (bal > 0) {
-        brokerageAccountsUsingFallback++;
-      } else {
-        brokerageAccountsMissingPositions++;
-      }
+      brokerageAccountsMissingPositions++;
+      valueSource = "missing";
     }
+
+    perAccountBreakdown.push({
+      accountId: acctAny.id,
+      accountName: acctAny.account_name,
+      institutionName: acctAny.institution_name ?? null,
+      mask: acctAny.mask ?? null,
+      positionsCount: acctPositionsCount,
+      positionsValue: acctPositionsValue,
+      balanceValue: acctBalance,
+      valueSource,
+    });
   }
 
   // ── Value calculations ──
   const positionsValue = positions.length > 0
     ? positions.reduce((sum: number, p: any) => sum + toNum(p.last_valuation), 0)
     : 0;
-  const fallbackBalanceValue = accountsSnapshot.investmentAccounts; // sum of investment account balances
+  const fallbackBalanceValue = accountsSnapshot.investmentAccounts;
 
   // Prefer positions if available, fallback to investment account balances
   const totalInvestmentValue = positionsValue > 0 ? positionsValue : fallbackBalanceValue;
@@ -484,6 +522,7 @@ export async function getCanonicalInvestments(
     brokerageAccountsMissingPositions,
     dataStatus,
     warnings,
+    perAccountBreakdown,
     positions,
     // Legacy aliases
     fromPositions: positionsValue,
