@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "../../../src/lib/supabase";
 import { functionBase } from "../../../src/lib/function-base";
-import { getCanonicalTaggedIncomeCount } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalTaggedIncomeCount, getCanonicalTaxableIncome } from "../../../src/lib/canonicalFinancialData";
 
 interface TaxEstimate {
   id: string;
@@ -130,6 +130,7 @@ export default function TaxCenterPage() {
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [taggedIncomeCount, setTaggedIncomeCount] = useState(0);
   const [profileComplete, setProfileComplete] = useState(false);
+  const [canonicalTaxableIncome, setCanonicalTaxableIncome] = useState<{ businessIncome: number; deductibleExpenses: number; taxableProfit: number } | null>(null);
 
   // Profile modal
   const [showEditProfile, setShowEditProfile] = useState(false);
@@ -157,7 +158,8 @@ export default function TaxCenterPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [estimatesRes, profileRes, taggedCount, jurisdictionsRes] = await Promise.all([
+    const currentYear = new Date().getFullYear();
+    const [estimatesRes, profileRes, taggedCount, jurisdictionsRes, canonicalTaxable] = await Promise.all([
       supabase.from("tax_estimates")
         .select("id, period_type, tax_year, quarter, taxable_income, total_tax_liability, income_tax, capital_gains_tax, self_employment_tax, balance_due, underpayment_flag, calculated_at")
         .eq("user_id", user.id)
@@ -172,6 +174,7 @@ export default function TaxCenterPage() {
         .select("id, name, code, jurisdiction_type")
         .order("jurisdiction_type", { ascending: false })
         .order("name"),
+      getCanonicalTaxableIncome(supabase, user.id, currentYear),
     ]);
 
     const jData = jurisdictionsRes.data ?? [];
@@ -191,6 +194,9 @@ export default function TaxCenterPage() {
     setEditJurisdictionId(p?.jurisdiction_id ?? fed?.id ?? "");
     setEditStateId1(p?.state_jurisdiction_id ?? "");
     setEditStateId2(p?.state_jurisdiction_id_2 ?? "");
+
+    // Store canonical taxable income for reference
+    setCanonicalTaxableIncome(canonicalTaxable);
 
     setLoading(false);
   };
