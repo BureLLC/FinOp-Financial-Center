@@ -9,7 +9,7 @@ import {
   calcTaxSavingsEstimate,
   toNum,
 } from "../../../src/lib/financialCalculations";
-import { getCanonicalDebitTransactions } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalCombinedWriteOffs, getCanonicalDebitTransactions } from "../../../src/lib/canonicalFinancialData";
 
 interface WriteOff {
   id: string;
@@ -123,16 +123,54 @@ export default function WriteOffsPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [writeOffsRes, txs] = await Promise.all([
-      supabase.from("write_offs")
-        .select("id, category, description, amount, expense_date, tax_year, deduction_type, is_verified, notes, transaction_id")
-        .eq("user_id", user.id)
-        .eq("tax_year", selectedYear)
-        .order("expense_date", { ascending: false }),
+    // Use canonical combined write-offs source (manual + transaction-based)
+    const [combined, txs] = await Promise.all([
+      getCanonicalCombinedWriteOffs(supabase, user.id, selectedYear),
       getCanonicalDebitTransactions(supabase, user.id),
     ]);
 
-    setWriteOffs(writeOffsRes.data ?? []);
+    // Convert combined write-offs to WriteOff interface for display
+    // Include both manual and transaction-based write-offs
+    const displayWriteOffs: WriteOff[] = combined.manual.map((wo) => ({
+      id: wo.id,
+      category: "Manual Entry",
+      description: null,
+      amount: toNum(wo.amount),
+      expense_date: wo.expense_date,
+      tax_year: wo.tax_year,
+      deduction_type: wo.deduction_type,
+      is_verified: wo.is_verified,
+      notes: null,
+      transaction_id: null,
+    }));
+
+    // Add transaction-based write-offs (marked as auto-generated)
+    const linkedTransactionIds = new Set(combined.manual.map((m) => m.id));
+    for (const tx of combined.transactionBased) {
+      // Don't double-count transactions already linked to manual write-offs
+      if (!linkedTransactionIds.has(tx.id)) {
+        displayWriteOffs.push({
+          id: tx.id,
+          category: "Transaction-Based",
+          description: tx.description ?? tx.merchant_name ?? "Business Expense",
+          amount: toNum(tx.amount),
+          expense_date: tx.transaction_date ?? "",
+          tax_year: selectedYear,
+          deduction_type: "other", // Default to "other" for transaction-based
+          is_verified: false, // User can verify later
+          notes: "Auto-generated from tagged transaction",
+          transaction_id: tx.id,
+        });
+      }
+    }
+
+    // Sort by date descending
+    displayWriteOffs.sort(
+      (a, b) =>
+        new Date(b.expense_date).getTime() - new Date(a.expense_date).getTime()
+    );
+
+    setWriteOffs(displayWriteOffs);
     setTransactions(txs);
     setLoading(false);
   };
