@@ -325,8 +325,9 @@ export default function InvestmentsPage() {
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const { data: snapAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("provider", "snaptrade").eq("is_active", true);
-    const allowed = new Set((snapAccounts ?? []).map((a) => a.id));
+    // Include positions from ALL active accounts (any provider: SnapTrade, Plaid, manual, future integrations)
+    const { data: activeAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null);
+    const allowed = new Set((activeAccounts ?? []).map((a) => a.id));
 
     const { data } = await supabase
       .from("positions")

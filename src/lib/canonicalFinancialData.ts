@@ -342,16 +342,31 @@ export async function getCanonicalInvestments(
   supabase: SupabaseClient,
   userId: string
 ): Promise<CanonicalInvestments> {
-  const [accountsSnapshot, positionsRes] = await Promise.all([
+  // Fetch active investment/brokerage accounts and positions in parallel
+  const [accountsSnapshot, activeInvestmentAcctsRes, positionsRes] = await Promise.all([
     getCanonicalAccountBalances(supabase, userId),
     supabase
+      .from("financial_accounts")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .is("deleted_at", null),
+    supabase
       .from("positions")
-      .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity")
+      .select("id, financial_account_id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity")
       .eq("user_id", userId)
       .is("deleted_at", null),
   ]);
 
-  const positions = positionsRes.data ?? [];
+  const activeAccountIds = new Set(
+    (activeInvestmentAcctsRes.data ?? []).map((a: any) => a.id)
+  );
+
+  // Only include positions linked to active, non-deleted accounts
+  // This matches the Investment Portfolio page logic (generalized for all providers)
+  const positions = (positionsRes.data ?? []).filter(
+    (p: any) => p.financial_account_id && activeAccountIds.has(p.financial_account_id)
+  );
   const fromAccounts = accountsSnapshot.investmentAccounts;
 
   // Calculate total from positions if available
