@@ -17,10 +17,13 @@ import {
   activePostedTransactions,
   deduplicateTransactions,
   RawTransaction,
+  RawWriteOff,
   calcTotalCash,
   calcTotalInvestmentsFromAccounts,
   calcTotalLiabilities,
   calcNetWorth,
+  calcTotalWriteOffExpenses,
+  calcTotalDeductible,
   toNum,
 } from "./financialCalculations";
 
@@ -62,6 +65,36 @@ export interface CanonicalInvestments {
   total: number;
   /** Raw position data if available */
   positions: any[];
+}
+
+export interface CanonicalWriteOffs {
+  /** All write-off records for user */
+  writeOffs: RawWriteOff[];
+  /** Total amount across all write-offs */
+  totalAmount: number;
+  /** Total deductible amount (after applying deduction rates) */
+  totalDeductible: number;
+  /** Breakdown by deduction type */
+  byType: Array<{
+    type: string;
+    count: number;
+    totalAmount: number;
+    deductibleAmount: number;
+    deductionRate: number;
+  }>;
+}
+
+export interface CanonicalNetWorth {
+  /** Active bank/cash account balances */
+  bankCash: number;
+  /** Active investment account balances */
+  investmentAccounts: number;
+  /** Active liability balances (credit, loans, mortgages) */
+  liabilities: number;
+  /** Bank cash + investments - liabilities */
+  netWorthValue: number;
+  /** Raw account data for detailed breakdown */
+  accounts: FinancialAccount[];
 }
 
 /**
@@ -293,5 +326,109 @@ export async function getCanonicalInvestments(
     fromPositions,
     total,
     positions,
+  };
+}
+
+/**
+ * Canonical Write-Offs Source
+ *
+ * Returns all write-off records for the user with calculated totals.
+ * Enforces:
+ * - User scope (filters by user_id)
+ * - Tax year filtering
+ * - Deductibility calculations (applies deduction rates)
+ *
+ * Usage:
+ *   const writeOffs = await getCanonicalWriteOffs(supabase, userId, taxYear);
+ *   console.log(`Total deductible: $${writeOffs.totalDeductible}`);
+ */
+export async function getCanonicalWriteOffs(
+  supabase: SupabaseClient,
+  userId: string,
+  taxYear: number
+): Promise<CanonicalWriteOffs> {
+  const res = await supabase
+    .from("write_offs")
+    .select("id, amount, deduction_type, is_verified, tax_year, expense_date")
+    .eq("user_id", userId)
+    .eq("tax_year", taxYear);
+
+  const writeOffs: RawWriteOff[] = res.data ?? [];
+
+  // Define deduction rates by type (must match DEDUCTION_TYPES in pages)
+  const deductionRates: Record<string, number> = {
+    home_office: 100,
+    vehicle: 100,
+    equipment: 100,
+    software: 100,
+    meals: 50,
+    travel: 100,
+    marketing: 100,
+    professional: 100,
+    education: 100,
+    other: 100,
+  };
+
+  // Calculate totals
+  const totalAmount = calcTotalWriteOffExpenses(writeOffs);
+  
+  // Build deduction rules for calculation
+  const deductionRules = Object.entries(deductionRates).map(([type, pct]) => ({
+    value: type,
+    pct,
+  }));
+  
+  const totalDeductible = calcTotalDeductible(writeOffs, deductionRules);
+
+  // Breakdown by type
+  const byType = Object.entries(deductionRates).map(([type, rate]) => {
+    const items = writeOffs.filter((w) => w.deduction_type === type);
+    const typeTotal = items.reduce((sum, w) => sum + toNum(w.amount), 0);
+    const deductibleAmount = typeTotal * (rate / 100);
+    return {
+      type,
+      count: items.length,
+      totalAmount: typeTotal,
+      deductibleAmount,
+      deductionRate: rate,
+    };
+  }).filter((d) => d.totalAmount > 0);
+
+  return {
+    writeOffs,
+    totalAmount,
+    totalDeductible,
+    byType,
+  };
+}
+
+/**
+ * Canonical Net Worth Source
+ *
+ * Explicitly calculates Net Worth from canonical sources.
+ * Net Worth = Active Bank Cash + Active Investments - Active Liabilities
+ *
+ * Ensures:
+ * - Only active, non-deleted accounts count
+ * - Brokerage accounts are separated from bank cash
+ * - Liabilities are properly classified
+ * - Multi-user isolation (user_id scoped)
+ *
+ * Usage:
+ *   const netWorth = await getCanonicalNetWorth(supabase, userId);
+ *   console.log(`Net worth: $${netWorth.netWorthValue}`);
+ */
+export async function getCanonicalNetWorth(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<CanonicalNetWorth> {
+  const balances = await getCanonicalAccountBalances(supabase, userId);
+
+  return {
+    bankCash: balances.bankCash,
+    investmentAccounts: balances.investmentAccounts,
+    liabilities: balances.liabilities,
+    netWorthValue: balances.netWorth,
+    accounts: balances.accounts,
   };
 }
