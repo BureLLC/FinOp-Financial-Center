@@ -1,0 +1,19 @@
+project_id = "hxaxmhtkzmfjtaqtcbvk"
+
+[functions.orchestrate-refresh]
+verify_jwt = true
+
+[functions.plaid-create-link-token]
+verify_jwt = true
+
+[functions.plaid-exchange-token]
+verify_jwt = true
+
+[functions.process-refresh-job]
+verify_jwt = true
+
+[functions.snaptrade-connect]
+verify_jwt = true
+
+[functions.snaptrade-sync]
+verify_jwt = true

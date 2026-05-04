@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { getMarketStatus } from "../../../src/lib/marketHours";
 import { createClient } from "../../../src/lib/supabase";
+import { getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
+import type { InvestmentDataStatus } from "../../../src/lib/canonicalFinancialData";
 
 interface Position {
   financial_account_id: string | null;
@@ -320,23 +322,39 @@ export default function InvestmentsPage() {
   const [addSaving, setAddSaving] = useState(false);
   const [addMsg, setAddMsg] = useState<string | null>(null);
 
+  const [investmentDataStatus, setInvestmentDataStatus] = useState<InvestmentDataStatus>("no_brokerage_connection");
+
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    // Only include positions from investment/brokerage accounts (not bank/depository/credit)
-    // Bank cash positions (e.g. Plaid-synced USD cash) belong in Total Cash, not Investments
-    const { data: investmentAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null).eq("account_type", "investment");
-    const allowed = new Set((investmentAccounts ?? []).map((a) => a.id));
 
-    const { data } = await supabase
-      .from("positions")
-      .select("id, financial_account_id, asset_symbol, asset_name, asset_type, calculated_quantity, last_price, last_valuation, total_cost_basis, unrealized_gain, average_cost_basis, is_short, last_price_updated_at")
-      .eq("user_id", user.id)
-      .is("deleted_at", null)
-      .order("last_valuation", { ascending: false, nullsFirst: false });
-    setPositions((data ?? []).filter((p) => p.financial_account_id && allowed.has(p.financial_account_id)));
+    // Use the same canonical investment source as Home and Financial Summary pages
+    // This ensures all pages show consistent investment data
+    const canonical = await getCanonicalInvestments(supabase, user.id);
+
+    // Log warnings for production observability
+    if (canonical.warnings.length > 0) {
+      console.warn("[Investments]", canonical.dataStatus, canonical.warnings);
+    }
+    setInvestmentDataStatus(canonical.dataStatus);
+
+    // The canonical function returns positions already filtered to investment accounts only.
+    // We need the full position fields for display, so re-fetch using the canonical account filter.
+    const investmentAccountIds = [...new Set(canonical.positions.map((p: any) => p.financial_account_id))];
+    if (investmentAccountIds.length > 0) {
+      const { data } = await supabase
+        .from("positions")
+        .select("id, financial_account_id, asset_symbol, asset_name, asset_type, calculated_quantity, last_price, last_valuation, total_cost_basis, unrealized_gain, average_cost_basis, is_short, last_price_updated_at")
+        .eq("user_id", user.id)
+        .is("deleted_at", null)
+        .in("financial_account_id", investmentAccountIds)
+        .order("last_valuation", { ascending: false, nullsFirst: false });
+      setPositions(data ?? []);
+    } else {
+      setPositions([]);
+    }
     setLoading(false);
   };
 
@@ -356,8 +374,8 @@ export default function InvestmentsPage() {
     if (!user) return;
 
     const { data: acct } = await supabase.from("financial_accounts")
-      .select("id").eq("user_id", user.id).eq("is_active", true).limit(1).maybeSingle();
-    if (!acct) { setAddMsg("No connected account found. Please connect a brokerage first."); setAddSaving(false); return; }
+      .select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null).eq("account_type", "investment").limit(1).maybeSingle();
+    if (!acct) { setAddMsg("No investment account found. Please connect a brokerage first."); setAddSaving(false); return; }
 
     const qty = Number(newQty);
     const price = Number(newPrice);

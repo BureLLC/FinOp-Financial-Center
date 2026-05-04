@@ -204,9 +204,14 @@ export default function FinancialSummaryPage() {
         ["loan", "mortgage", "line of credit"].includes(a.account_subtype ?? ""),
     );
 
+    // Log investment data status for production observability
+    if (investments.warnings.length > 0) {
+      console.warn("[Investments]", investments.dataStatus, investments.warnings);
+    }
+
     const totalCash = balances.bankCash;
-    const totalInvestments = investments.total;
-    const investmentsFromPositions = investments.fromPositions > 0;
+    const totalInvestments = investments.totalInvestmentValue;
+    const investmentsFromPositions = investments.dataStatus === "positions_verified";
     const totalLiabilities = balances.liabilities;
     // Net Worth must use canonical investment total (position-based if available)
     // to match Home and Investments pages
