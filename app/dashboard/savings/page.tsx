@@ -135,6 +135,7 @@ export default function SavingsPage() {
   };
 
   const totalSaved = goals.reduce((s, g) => s + Number(g.current_amount), 0);
+  const budgetSavingsTotal = budgetSavingsCategories.reduce((s: number, c: any) => s + Number(c.monthly_limit ?? 0), 0);
   const goalsWithTarget = goals.filter((g) => Number(g.target_amount) > 0);
   const totalTarget = goalsWithTarget.reduce((s, g) => s + Number(g.target_amount), 0);
   const sinkingFunds = goals.filter((g) => g.goal_type === "sinking_fund");
@@ -490,7 +491,7 @@ export default function SavingsPage() {
                 title="Reset total">↺</button>
             </div>
             <div style={{ fontSize: "22px", fontWeight: 800, color: "#22c55e" }}>{fmt(totalSaved)}</div>
-            <div style={{ fontSize: "10px", color: "#334155", marginTop: "4px" }}>Current across all goals</div>
+            <div style={{ fontSize: "10px", color: "#334155", marginTop: "4px" }}>Current across all goals{budgetSavingsTotal > 0 ? ` + ${fmtCompact(budgetSavingsTotal)}/mo budget` : ""}</div>
             <div style={{ marginTop: "10px", height: "2px", background: "rgba(34,197,94,0.3)", borderRadius: "1px" }} />
           </div>
           <div style={{ padding: "18px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "12px" }}>
@@ -535,6 +536,24 @@ export default function SavingsPage() {
             )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px" }}>
               {oneTimeGoals.map((goal) => <GoalCard key={goal.id} goal={goal} />)}
+            </div>
+          </div>
+        )}
+
+        {/* Budget savings categories */}
+        {budgetSavingsCategories.length > 0 && (
+          <div style={{ marginTop: "24px", marginBottom: "24px" }}>
+            <div style={{ fontSize: "10px", fontWeight: 700, color: "#f59e0b", letterSpacing: "0.12em", marginBottom: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>📋</span> BUDGET SAVINGS CATEGORIES ({budgetSavingsCategories.length})
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "12px" }}>
+              {budgetSavingsCategories.map((cat: any) => (
+                <div key={cat.id} style={{ padding: "16px", background: "rgba(245,158,11,0.04)", border: "1px solid rgba(245,158,11,0.15)", borderRadius: "14px" }}>
+                  <div style={{ fontSize: "13px", fontWeight: 700, color: "#f8fafc", marginBottom: "4px" }}>{cat.name}</div>
+                  {cat.description && <div style={{ fontSize: "11px", color: "#475569", marginBottom: "6px" }}>{cat.description}</div>}
+                  <div style={{ fontSize: "18px", fontWeight: 800, color: "#f59e0b" }}>{fmt(Number(cat.monthly_limit ?? 0))}<span style={{ fontSize: "11px", color: "#475569", fontWeight: 600 }}>/mo</span></div>
+                </div>
+              ))}
             </div>
           </div>
         )}

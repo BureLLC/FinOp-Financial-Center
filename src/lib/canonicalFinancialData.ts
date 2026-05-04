@@ -303,7 +303,7 @@ export async function getCanonicalInvestments(
   const [accountsSnapshot, positionsRes] = await Promise.all([
     getCanonicalAccountBalances(supabase, userId),
     supabase
-      .from("investment_positions")
+      .from("positions")
       .select("id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity")
       .eq("user_id", userId)
       .is("deleted_at", null),
@@ -498,7 +498,7 @@ export async function getCanonicalCombinedWriteOffs(
   const [manualRes, txBased] = await Promise.all([
     supabase
       .from("write_offs")
-      .select("id, amount, deduction_type, is_verified, tax_year, expense_date")
+      .select("id, amount, deduction_type, is_verified, tax_year, expense_date, transaction_id")
       .eq("user_id", userId)
       .eq("tax_year", taxYear),
     getCanonicalTransactionBasedWriteOffs(supabase, userId, taxYear),
