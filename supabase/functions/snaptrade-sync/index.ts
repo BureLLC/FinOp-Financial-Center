@@ -98,7 +98,7 @@ serve(async (req) => {
         await supabase.from("integration_connections").update({
           sync_status: "error",
           updated_at: new Date().toISOString(),
-          metadata: { last_sync_error: "account_fetch_failed", last_sync_error_at: new Date().toISOString() },
+          connection_metadata: { last_sync_error: "account_fetch_failed", last_sync_error_at: new Date().toISOString() },
         }).eq("id", connId)
       }
       return json({ error: "Failed to fetch accounts", details: acctResult.data }, 500)
@@ -148,7 +148,7 @@ serve(async (req) => {
         sync_status: "synced",
         last_synced: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-        metadata: { last_sync_result: "no_accounts_returned", last_sync_at: new Date().toISOString() },
+        connection_metadata: { last_sync_result: "no_accounts_returned", last_sync_at: new Date().toISOString() },
       }).eq("id", connectionId)
       return json({
         success: true,
@@ -378,7 +378,7 @@ serve(async (req) => {
       sync_status: finalSyncStatus,
       last_synced: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      metadata: syncMetadata,
+      connection_metadata: syncMetadata,
     }).eq("id", connectionId)
 
     return json({
