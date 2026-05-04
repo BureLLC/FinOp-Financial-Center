@@ -98,15 +98,42 @@ export interface CanonicalAccountBalances {
   accounts: FinancialAccount[];
 }
 
+/** Data status for canonical investment result */
+export type InvestmentDataStatus =
+  | "positions_verified"    // Positions exist and are used for valuation
+  | "fallback_used"         // No positions; using account current_balance as fallback
+  | "missing_positions"     // Brokerage account exists but no positions and no usable balance
+  | "no_brokerage_connection"; // No investment/brokerage accounts found at all
+
 export interface CanonicalInvestments {
-  /** Total from investment accounts (synced broker positions) */
-  fromAccounts: number;
-  /** Total from investment positions (detailed holdings) */
-  fromPositions: number;
-  /** Preferred value (positions if available, else accounts) */
-  total: number;
+  /** Total investment value (positions if available, else fallback balance) */
+  totalInvestmentValue: number;
+  /** Value calculated from actual positions/holdings */
+  positionsValue: number;
+  /** Value from brokerage account current_balance (fallback) */
+  fallbackBalanceValue: number;
+  /** Number of active investment/brokerage accounts */
+  brokerageAccountCount: number;
+  /** Number of brokerage accounts that have positions */
+  brokerageAccountsWithPositions: number;
+  /** Number of brokerage accounts using fallback balance */
+  brokerageAccountsUsingFallback: number;
+  /** Number of brokerage accounts with no positions and no usable balance */
+  brokerageAccountsMissingPositions: number;
+  /** Overall data status */
+  dataStatus: InvestmentDataStatus;
+  /** Warnings for consumers to log or display */
+  warnings: string[];
   /** Raw position data if available */
   positions: any[];
+
+  // ── Legacy aliases (keep existing consumers working) ──
+  /** @deprecated Use positionsValue */
+  fromPositions: number;
+  /** @deprecated Use fallbackBalanceValue */
+  fromAccounts: number;
+  /** @deprecated Use totalInvestmentValue */
+  total: number;
 }
 
 export interface CanonicalWriteOffs {
@@ -360,9 +387,8 @@ export async function getCanonicalInvestments(
       .is("deleted_at", null),
   ]);
 
-  const investmentAccountIds = new Set(
-    (investmentAcctsRes.data ?? []).map((a: any) => a.id)
-  );
+  const investmentAccounts = investmentAcctsRes.data ?? [];
+  const investmentAccountIds = new Set(investmentAccounts.map((a: any) => a.id));
 
   // Only include positions linked to active investment accounts
   // This excludes cash positions from bank/depository accounts (e.g. Plaid cash sync)
@@ -370,22 +396,87 @@ export async function getCanonicalInvestments(
   const positions = (positionsRes.data ?? []).filter(
     (p: any) => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
   );
-  const fromAccounts = accountsSnapshot.investmentAccounts;
 
-  // Calculate total from investment positions (excludes bank cash positions)
-  let fromPositions = 0;
-  if (positions.length > 0) {
-    fromPositions = positions.reduce((sum: number, p: any) => sum + toNum(p.last_valuation), 0);
+  // ── Per-account analysis ──
+  const accountsWithPositionIds = new Set(
+    positions.map((p: any) => p.financial_account_id)
+  );
+  const brokerageAccountCount = investmentAccounts.length;
+  let brokerageAccountsWithPositions = 0;
+  let brokerageAccountsUsingFallback = 0;
+  let brokerageAccountsMissingPositions = 0;
+
+  for (const acct of investmentAccounts) {
+    if (accountsWithPositionIds.has(acct.id)) {
+      brokerageAccountsWithPositions++;
+    } else {
+      // No positions for this account — check if balance is usable as fallback
+      const acctBalance = (accountsSnapshot.accounts ?? []).find(
+        (a: any) => a.id === acct.id
+      );
+      const bal = toNum(acctBalance?.current_balance);
+      if (bal > 0) {
+        brokerageAccountsUsingFallback++;
+      } else {
+        brokerageAccountsMissingPositions++;
+      }
+    }
   }
 
+  // ── Value calculations ──
+  const positionsValue = positions.length > 0
+    ? positions.reduce((sum: number, p: any) => sum + toNum(p.last_valuation), 0)
+    : 0;
+  const fallbackBalanceValue = accountsSnapshot.investmentAccounts; // sum of investment account balances
+
   // Prefer positions if available, fallback to investment account balances
-  const total = fromPositions > 0 ? fromPositions : fromAccounts;
+  const totalInvestmentValue = positionsValue > 0 ? positionsValue : fallbackBalanceValue;
+
+  // ── Data status & warnings ──
+  const warnings: string[] = [];
+  let dataStatus: InvestmentDataStatus;
+
+  if (brokerageAccountCount === 0) {
+    dataStatus = "no_brokerage_connection";
+  } else if (brokerageAccountsWithPositions > 0) {
+    dataStatus = "positions_verified";
+    if (brokerageAccountsUsingFallback > 0) {
+      warnings.push(
+        `${brokerageAccountsUsingFallback} brokerage account(s) using balance fallback — positions not yet synced`
+      );
+    }
+    if (brokerageAccountsMissingPositions > 0) {
+      warnings.push(
+        `${brokerageAccountsMissingPositions} brokerage account(s) have no positions and no usable balance`
+      );
+    }
+  } else if (brokerageAccountsUsingFallback > 0) {
+    dataStatus = "fallback_used";
+    warnings.push(
+      `No positions synced for ${brokerageAccountCount} brokerage account(s) — using account balance as temporary fallback`
+    );
+  } else {
+    dataStatus = "missing_positions";
+    warnings.push(
+      `${brokerageAccountCount} brokerage account(s) connected but no positions or usable balance found — sync may have failed`
+    );
+  }
 
   return {
-    fromAccounts,
-    fromPositions,
-    total,
+    totalInvestmentValue,
+    positionsValue,
+    fallbackBalanceValue,
+    brokerageAccountCount,
+    brokerageAccountsWithPositions,
+    brokerageAccountsUsingFallback,
+    brokerageAccountsMissingPositions,
+    dataStatus,
+    warnings,
     positions,
+    // Legacy aliases
+    fromPositions: positionsValue,
+    fromAccounts: fallbackBalanceValue,
+    total: totalInvestmentValue,
   };
 }
 

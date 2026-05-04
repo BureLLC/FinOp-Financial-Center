@@ -51,15 +51,20 @@ export default function DashboardHome() {
 
         const totalExpenses = calcTotalOut(postedTransactions);
 
+        // Log investment data status for production observability
+        if (investments.warnings.length > 0) {
+          console.warn("[Investments]", investments.dataStatus, investments.warnings);
+        }
+
         // Net Worth must use the same investment total as the Investments card
         // balances.netWorth uses account-based investments which may differ from position-based
-        const canonicalNetWorth = balances.bankCash + investments.total - balances.liabilities;
+        const canonicalNetWorth = balances.bankCash + investments.totalInvestmentValue - balances.liabilities;
 
         setKpi({
           netWorth: canonicalNetWorth,
           totalCash: balances.bankCash,
           totalExpenses,
-          totalInvestments: investments.total,
+          totalInvestments: investments.totalInvestmentValue,
           accountCount: balances.accounts.length,
           lastSynced: new Date().toISOString(),
         });

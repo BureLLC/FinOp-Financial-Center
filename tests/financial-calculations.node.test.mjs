@@ -1181,3 +1181,237 @@ test("brokerage-path: asset allocation includes investment value from positions"
   const segmentTotal = segments.reduce((s, seg) => s + seg.value, 0);
   assert.equal(segmentTotal, 57000);
 });
+
+// ─── Canonical Investment Metadata Tests ───────────────────────────────────────
+// Simulates the structured metadata logic from getCanonicalInvestments
+// to verify dataStatus, warnings, and value separation without Supabase
+
+/**
+ * Pure-logic replica of getCanonicalInvestments metadata computation.
+ * Takes pre-fetched accounts and positions (already filtered by user_id).
+ */
+function computeCanonicalInvestmentMetadata(investmentAccounts, allPositions, allAccounts) {
+  const investmentAccountIds = new Set(investmentAccounts.map((a) => a.id));
+  const positions = allPositions.filter(
+    (p) => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
+  );
+
+  const accountsWithPositionIds = new Set(positions.map((p) => p.financial_account_id));
+  const brokerageAccountCount = investmentAccounts.length;
+  let brokerageAccountsWithPositions = 0;
+  let brokerageAccountsUsingFallback = 0;
+  let brokerageAccountsMissingPositions = 0;
+
+  for (const acct of investmentAccounts) {
+    if (accountsWithPositionIds.has(acct.id)) {
+      brokerageAccountsWithPositions++;
+    } else {
+      const bal = toNum(acct.current_balance);
+      if (bal > 0) {
+        brokerageAccountsUsingFallback++;
+      } else {
+        brokerageAccountsMissingPositions++;
+      }
+    }
+  }
+
+  const positionsValue = positions.reduce((s, p) => s + toNum(p.last_valuation), 0);
+  const fallbackBalanceValue = calcTotalInvestmentsFromAccounts(allAccounts);
+  const totalInvestmentValue = positionsValue > 0 ? positionsValue : fallbackBalanceValue;
+
+  const warnings = [];
+  let dataStatus;
+
+  if (brokerageAccountCount === 0) {
+    dataStatus = "no_brokerage_connection";
+  } else if (brokerageAccountsWithPositions > 0) {
+    dataStatus = "positions_verified";
+    if (brokerageAccountsUsingFallback > 0) {
+      warnings.push(`${brokerageAccountsUsingFallback} brokerage account(s) using balance fallback`);
+    }
+    if (brokerageAccountsMissingPositions > 0) {
+      warnings.push(`${brokerageAccountsMissingPositions} brokerage account(s) have no positions and no usable balance`);
+    }
+  } else if (brokerageAccountsUsingFallback > 0) {
+    dataStatus = "fallback_used";
+    warnings.push(`No positions synced — using account balance as temporary fallback`);
+  } else {
+    dataStatus = "missing_positions";
+    warnings.push(`${brokerageAccountCount} brokerage account(s) connected but no positions or usable balance found`);
+  }
+
+  return {
+    totalInvestmentValue,
+    positionsValue,
+    fallbackBalanceValue,
+    brokerageAccountCount,
+    brokerageAccountsWithPositions,
+    brokerageAccountsUsingFallback,
+    brokerageAccountsMissingPositions,
+    dataStatus,
+    warnings,
+    positions,
+  };
+}
+
+test("canonical-metadata: positions_verified when positions exist", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 50000 },
+    { id: "bank1", account_type: "depository", current_balance: 10000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 52000 },
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.dataStatus, "positions_verified");
+  assert.equal(result.positionsValue, 52000);
+  assert.equal(result.totalInvestmentValue, 52000);
+  assert.equal(result.brokerageAccountsWithPositions, 1);
+  assert.equal(result.brokerageAccountsUsingFallback, 0);
+  assert.equal(result.brokerageAccountsMissingPositions, 0);
+  assert.equal(result.warnings.length, 0);
+});
+
+test("canonical-metadata: fallback_used when no positions but account balance exists", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 45000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.dataStatus, "fallback_used");
+  assert.equal(result.positionsValue, 0);
+  assert.equal(result.fallbackBalanceValue, 45000);
+  assert.equal(result.totalInvestmentValue, 45000);
+  assert.equal(result.brokerageAccountsWithPositions, 0);
+  assert.equal(result.brokerageAccountsUsingFallback, 1);
+  assert.equal(result.warnings.length, 1);
+  assert.ok(result.warnings[0].includes("fallback"));
+});
+
+test("canonical-metadata: missing_positions when no positions and no usable balance", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 0 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.dataStatus, "missing_positions");
+  assert.equal(result.totalInvestmentValue, 0);
+  assert.equal(result.brokerageAccountsMissingPositions, 1);
+  assert.equal(result.warnings.length, 1);
+  assert.ok(result.warnings[0].includes("no positions"));
+});
+
+test("canonical-metadata: no_brokerage_connection when no investment accounts", () => {
+  const accounts = [
+    { id: "bank1", account_type: "depository", current_balance: 10000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.dataStatus, "no_brokerage_connection");
+  assert.equal(result.totalInvestmentValue, 0);
+  assert.equal(result.brokerageAccountCount, 0);
+  assert.equal(result.warnings.length, 0);
+});
+
+test("canonical-metadata: mixed accounts — some with positions, some fallback, some missing", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 50000 },
+    { id: "inv2", account_type: "investment", current_balance: 30000 },
+    { id: "inv3", account_type: "investment", current_balance: 0 },
+    { id: "bank1", account_type: "depository", current_balance: 5000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 55000 },
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.dataStatus, "positions_verified");
+  assert.equal(result.positionsValue, 55000);
+  assert.equal(result.totalInvestmentValue, 55000); // positions preferred
+  assert.equal(result.brokerageAccountCount, 3);
+  assert.equal(result.brokerageAccountsWithPositions, 1);
+  assert.equal(result.brokerageAccountsUsingFallback, 1); // inv2 has balance but no positions
+  assert.equal(result.brokerageAccountsMissingPositions, 1); // inv3 has nothing
+  assert.equal(result.warnings.length, 2);
+});
+
+test("canonical-metadata: duplicate positions do not double-count", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 50000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  // Two distinct position records for same account
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 25000 },
+    { financial_account_id: "inv1", last_valuation: 25000 },
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.positionsValue, 50000); // sum of both, not doubled by account
+  assert.equal(result.brokerageAccountsWithPositions, 1); // still 1 account
+});
+
+test("canonical-metadata: bank positions excluded from investment total", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 40000 },
+    { id: "bank1", account_type: "depository", current_balance: 10000 },
+  ];
+  const investmentAccounts = accounts.filter((a) => a.account_type === "investment");
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 42000 },
+    { financial_account_id: "bank1", last_valuation: 500 }, // bank position — must be excluded
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, accounts);
+  assert.equal(result.positionsValue, 42000); // bank position excluded
+  assert.equal(result.positions.length, 1);
+});
+
+test("canonical-metadata: user isolation — separate metadata per user dataset", () => {
+  // User A
+  const userAAccounts = [{ id: "a-inv1", account_type: "investment", current_balance: 100000 }];
+  const userAPositions = [{ financial_account_id: "a-inv1", last_valuation: 105000 }];
+  const resultA = computeCanonicalInvestmentMetadata(
+    userAAccounts.filter((a) => a.account_type === "investment"), userAPositions, userAAccounts
+  );
+
+  // User B
+  const userBAccounts = [{ id: "b-inv1", account_type: "investment", current_balance: 0 }];
+  const userBPositions = [];
+  const resultB = computeCanonicalInvestmentMetadata(
+    userBAccounts.filter((a) => a.account_type === "investment"), userBPositions, userBAccounts
+  );
+
+  assert.equal(resultA.dataStatus, "positions_verified");
+  assert.equal(resultA.totalInvestmentValue, 105000);
+  assert.equal(resultB.dataStatus, "missing_positions");
+  assert.equal(resultB.totalInvestmentValue, 0);
+});
+
+test("canonical-metadata: deleted/disconnected brokerage accounts excluded by pre-filter", () => {
+  // Simulate: only active, non-deleted investment accounts are passed in
+  // (the canonical function filters deleted_at IS NULL and is_active = true before this logic)
+  const allAccounts = [
+    { id: "inv1", account_type: "investment", current_balance: 50000, is_active: true, deleted_at: null },
+    { id: "inv2", account_type: "investment", current_balance: 30000, is_active: false, deleted_at: "2026-01-01" },
+  ];
+  // Only active accounts would be passed to the metadata computation
+  const activeInvestmentAccounts = allAccounts.filter(
+    (a) => a.account_type === "investment" && a.is_active && !a.deleted_at
+  );
+  const positions = [{ financial_account_id: "inv1", last_valuation: 52000 }];
+
+  const result = computeCanonicalInvestmentMetadata(activeInvestmentAccounts, positions, allAccounts);
+  assert.equal(result.brokerageAccountCount, 1); // only active account counted
+  assert.equal(result.brokerageAccountsWithPositions, 1);
+  assert.equal(result.dataStatus, "positions_verified");
+});
