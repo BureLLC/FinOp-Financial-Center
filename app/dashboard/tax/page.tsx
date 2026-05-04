@@ -295,12 +295,17 @@ export default function TaxCenterPage() {
   const annual = estimates.find((e) => e.period_type === "annual");
   const quarterly = estimates.filter((e) => e.period_type === "quarterly").sort((a, b) => (a.quarter ?? 0) - (b.quarter ?? 0));
   const currentQuarter = Math.ceil((new Date().getMonth() + 1) / 3);
-  const totalLiability = annual?.total_tax_liability ?? 0;
+  const staleLiability = annual?.total_tax_liability ?? 0;
   // Use canonical taxable income for display; fall back to stale estimate only if canonical not loaded
   const cti = canonicalTaxableIncome ?? { businessIncome: 0, deductibleExpenses: 0, taxableProfit: 0 };
   const displayTaxableIncome = cti.taxableProfit > 0
     ? cti.taxableProfit
     : Number(annual?.taxable_income ?? 0);
+  // Recalculate total tax liability from canonical taxable income when available
+  // SE tax = 15.3% of 92.35% of profit; income tax ~22% marginal estimate
+  const totalLiability = cti.taxableProfit > 0
+    ? Math.round((cti.taxableProfit * 0.9235 * 0.153) + (cti.taxableProfit * 0.22))
+    : staleLiability;
   const effectiveRate = displayTaxableIncome > 0
     ? (totalLiability / displayTaxableIncome) * 100 : 0;
   const taxBreakdown = annual ? [
