@@ -27,6 +27,48 @@ import {
   toNum,
 } from "./financialCalculations";
 
+// ─── Central Transaction Classification Layer ─────────────────────────────────
+// These functions define exactly how transaction fields control roll-ups.
+// All pages must use these instead of ad-hoc field checks.
+
+const DEDUCTIBLE_CATEGORIES = new Set([
+  "business", "home office", "vehicle", "equipment", "software",
+  "meals", "travel", "professional services", "advertising",
+  "office supplies", "insurance", "utilities",
+]);
+
+/** A transaction is business income when it is a credit with business/self-employment income_subtype. */
+export function isBusinessIncome(tx: RawTransaction): boolean {
+  return (
+    tx.direction === "credit" &&
+    (tx.income_subtype === "business" || tx.income_subtype === "self-employment") &&
+    tx.deleted_at == null
+  );
+}
+
+/** A transaction is a deductible business expense when it is a debit with a deductible category and is not a transfer or tax payment. */
+export function isDeductibleBusinessExpense(tx: RawTransaction): boolean {
+  const cat = (tx.category ?? "").toLowerCase();
+  const txType = (tx.transaction_type ?? "").toLowerCase();
+  return (
+    tx.direction === "debit" &&
+    DEDUCTIBLE_CATEGORIES.has(cat) &&
+    txType !== "transfer" &&
+    txType !== "tax_payment" &&
+    tx.deleted_at == null
+  );
+}
+
+/** Transfers should not count as income, expenses, write-offs, or tax deductions. */
+export function isTransfer(tx: RawTransaction): boolean {
+  return (tx.transaction_type ?? "").toLowerCase() === "transfer";
+}
+
+/** Tax payments are not deductible unless specifically classified. */
+export function isTaxPayment(tx: RawTransaction): boolean {
+  return (tx.transaction_type ?? "").toLowerCase() === "tax_payment";
+}
+
 export interface FinancialSnapshot {
   transactions: RawTransaction[];
   accounts: FinancialAccount[];
@@ -456,14 +498,9 @@ export async function getCanonicalTransactionBasedWriteOffs(
 ): Promise<RawTransaction[]> {
   const { transactions } = await getCanonicalTransactions(supabase, userId);
 
-  // Filter to business/self-employment expense transactions (debit only)
-  // that are posted, not deleted, from active accounts
+  // Filter to deductible business expense transactions using central classification
   const deductibleExpenses = activePostedTransactions(transactions).filter(
-    (tx) =>
-      tx.direction === "debit" &&
-      (tx.income_subtype === "business" || tx.income_subtype === "self-employment") &&
-      tx.deleted_at == null &&
-      tx.transaction_date
+    (tx) => isDeductibleBusinessExpense(tx) && tx.transaction_date
   );
 
   // Filter to transactions in the requested tax year
@@ -619,18 +656,24 @@ export async function getCanonicalTaxableIncome(
     getCanonicalCombinedWriteOffs(supabase, userId, taxYear),
   ]);
 
-  // Filter to business/rental/other income (deductible income types)
-  const deductibleIncomeTypes = new Set(["business", "rental", "other"]);
+  // Business income from transactions tagged as business/self-employment income
   const businessIncome = postedTxs
-    .filter(
-      (tx) =>
-        tx.direction === "credit" &&
-        deductibleIncomeTypes.has(tx.income_subtype ?? "") &&
-        tx.deleted_at == null
-    )
+    .filter((tx) => isBusinessIncome(tx))
     .reduce((sum, tx) => sum + toNum(tx.amount), 0);
 
-  const deductibleExpenses = writeOffs.totalDeductible;
+  // Also include deductible expenses directly from transactions (not just manual write-offs)
+  // This ensures tagging a transaction as Business category immediately affects tax
+  const txBasedDeductible = postedTxs
+    .filter((tx) => isDeductibleBusinessExpense(tx) && tx.transaction_date)
+    .filter((tx) => {
+      const txYear = new Date(tx.transaction_date!).getFullYear();
+      return txYear === taxYear;
+    })
+    .reduce((sum, tx) => sum + Math.abs(toNum(tx.amount)), 0);
+
+  // Use the greater of manual write-offs or transaction-based deductible expenses
+  // to avoid double-counting while ensuring tagged transactions are reflected
+  const deductibleExpenses = Math.max(writeOffs.totalDeductible, txBasedDeductible);
   const taxableProfit = Math.max(businessIncome - deductibleExpenses, 0);
 
   return {
