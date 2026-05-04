@@ -1609,3 +1609,140 @@ test("generic-sync: multiple accounts per institution all contribute to total", 
   assert.equal(result.brokerageAccountsWithPositions, 3);
   assert.equal(result.dataStatus, "positions_verified");
 });
+
+// ─── Regression: connections page visibility ──────────────────────────────────
+// deriveBrokerageStatus is already declared above; reuse it here.
+
+// Simulates connections/page.tsx query filter: .neq("status", "deleted")
+function filterActiveConnections(allConnections) {
+  return allConnections.filter(c => c.status !== "deleted");
+}
+
+test("regression: plaid connection with active status appears in connections list", () => {
+  const connections = [
+    { id: "c1", provider: "plaid", institution_name: "TD Bank", status: "active", sync_status: "synced" },
+  ];
+  const visible = filterActiveConnections(connections);
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].institution_name, "TD Bank");
+});
+
+test("regression: plaid connection with inactive status still appears (not deleted)", () => {
+  const connections = [
+    { id: "c1", provider: "plaid", institution_name: "TD Bank", status: "inactive", sync_status: "never" },
+  ];
+  const visible = filterActiveConnections(connections);
+  assert.equal(visible.length, 1, "inactive plaid connection must still appear on connections page");
+});
+
+test("regression: deleted connection is excluded from connections list", () => {
+  const connections = [
+    { id: "c1", provider: "plaid", institution_name: "TD Bank", status: "deleted", sync_status: "never" },
+  ];
+  const visible = filterActiveConnections(connections);
+  assert.equal(visible.length, 0);
+});
+
+test("regression: plaid and snaptrade connections coexist independently", () => {
+  const connections = [
+    { id: "c1", provider: "plaid",      institution_name: "TD Bank",  status: "active",   sync_status: "synced" },
+    { id: "c2", provider: "snaptrade",  institution_name: "Fidelity", status: "active",   sync_status: "synced" },
+  ];
+  const visible = filterActiveConnections(connections);
+  assert.equal(visible.length, 2);
+  assert.ok(visible.some(c => c.provider === "plaid"));
+  assert.ok(visible.some(c => c.provider === "snaptrade"));
+});
+
+test("regression: plaid connection uses sync_status badge, not brokerage derivation", () => {
+  const conn = { id: "c1", provider: "plaid", sync_status: "synced" };
+  const status = deriveBrokerageStatus(conn, [], []);
+  assert.equal(status.label, "Synced");
+  assert.equal(status.warning, undefined, "plaid connections must never show a brokerage warning");
+});
+
+test("regression: plaid connection with sync_status=never shows Never synced, not brokerage warning", () => {
+  const conn = { id: "c1", provider: "plaid", sync_status: "never" };
+  const status = deriveBrokerageStatus(conn, [], []);
+  assert.equal(status.label, "Never synced");
+  assert.equal(status.warning, undefined);
+});
+
+test("regression: snaptrade status derivation does not affect plaid display", () => {
+  const plaidConn    = { id: "c1", provider: "plaid",     sync_status: "synced" };
+  const snapConn     = { id: "c2", provider: "snaptrade", sync_status: "synced" };
+  const snapAccounts = [{ id: "a1", current_balance: 0 }];
+  const posCounts    = [];
+
+  const plaidStatus = deriveBrokerageStatus(plaidConn, [], []);
+  const snapStatus  = deriveBrokerageStatus(snapConn, snapAccounts, posCounts);
+
+  assert.equal(plaidStatus.label, "Synced",      "plaid status must be derived from sync_status only");
+  assert.equal(snapStatus.label, "Missing Data", "snaptrade with zero-balance account and no positions shows Missing Data");
+});
+
+test("regression: snaptrade connection with no child accounts shows warning, not clean synced", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const status = deriveBrokerageStatus(conn, [], []);
+  assert.equal(status.label, "No Accounts");
+  assert.ok(status.warning, "must show a warning when brokerage has no child accounts");
+});
+
+test("regression: snaptrade connection with no accounts and sync_status=never shows Pending Sync", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "never" };
+  const status = deriveBrokerageStatus(conn, [], []);
+  assert.equal(status.label, "Pending Sync");
+  assert.ok(status.warning);
+});
+
+test("regression: snaptrade connection with accounts and positions shows Synced (no warning)", () => {
+  const conn     = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [{ id: "a1", current_balance: 10000 }];
+  const posCounts = [{ financial_account_id: "a1", count: 5 }];
+  const status = deriveBrokerageStatus(conn, accounts, posCounts);
+  assert.equal(status.label, "Synced");
+  assert.equal(status.warning, undefined);
+});
+
+test("regression: snaptrade with accounts but no positions shows No Positions warning (not Synced)", () => {
+  const conn     = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [{ id: "a1", current_balance: 50000 }];
+  const posCounts = [];
+  const status = deriveBrokerageStatus(conn, accounts, posCounts);
+  assert.equal(status.label, "No Positions");
+  assert.ok(status.warning, "must warn when accounts present but positions missing");
+});
+
+test("regression: snaptrade partial sync warns about missing accounts (some have positions, some don't)", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [
+    { id: "a1", current_balance: 10000 },
+    { id: "a2", current_balance: 5000 },
+  ];
+  const posCounts = [{ financial_account_id: "a1", count: 3 }]; // a2 has no positions
+  const status = deriveBrokerageStatus(conn, accounts, posCounts);
+  assert.equal(status.label, "Partial");
+  assert.ok(status.warning?.includes("1 account(s) missing positions"));
+});
+
+test("regression: connections array null (failed query) defaults to empty — no crash", () => {
+  // Mirrors: setConnections(connRes.data ?? [])
+  const connResData = null;
+  const connections = connResData ?? [];
+  assert.equal(connections.length, 0);
+  // No crash simulates what the UI does — but this verifies the fallback is safe,
+  // not that the data is correct. Real fix is removing invalid column from SELECT.
+});
+
+test("regression: multi-user isolation — user A connections do not appear for user B", () => {
+  const allConnections = [
+    { id: "c1", user_id: "user-a", provider: "plaid",     institution_name: "TD Bank",  status: "active" },
+    { id: "c2", user_id: "user-b", provider: "snaptrade", institution_name: "Fidelity", status: "active" },
+  ];
+  const userAConnections = filterActiveConnections(allConnections.filter(c => c.user_id === "user-a"));
+  const userBConnections = filterActiveConnections(allConnections.filter(c => c.user_id === "user-b"));
+  assert.equal(userAConnections.length, 1);
+  assert.equal(userAConnections[0].institution_name, "TD Bank");
+  assert.equal(userBConnections.length, 1);
+  assert.equal(userBConnections[0].institution_name, "Fidelity");
+});

@@ -15,7 +15,6 @@ interface Connection {
   sync_status: string;
   last_synced: string | null;
   created_at: string;
-  metadata?: Record<string, unknown>;
 }
 
 interface Account {
@@ -166,7 +165,7 @@ export default function ConnectionsPage() {
     const [connRes, acctRes, posRes] = await Promise.all([
       supabase
         .from("integration_connections")
-        .select("id, provider, institution_name, status, connection_status, sync_status, last_synced, created_at, metadata")
+        .select("id, provider, institution_name, status, connection_status, sync_status, last_synced, created_at")
         .eq("user_id", user.id)
         .neq("status", "deleted")
         .order("created_at", { ascending: false }),
@@ -191,6 +190,8 @@ export default function ConnectionsPage() {
     }
     setPositionCounts(Array.from(posCounts.entries()).map(([financial_account_id, count]) => ({ financial_account_id, count })));
 
+    if (connRes.error) console.error("[connections] integration_connections query failed:", connRes.error);
+    if (acctRes.error) console.error("[connections] financial_accounts query failed:", acctRes.error);
     setConnections(connRes.data ?? []);
     setAccounts(acctRes.data ?? []);
     setLoading(false);
