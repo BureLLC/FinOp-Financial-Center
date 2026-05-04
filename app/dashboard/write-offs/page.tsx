@@ -145,7 +145,10 @@ export default function WriteOffsPage() {
     }));
 
     // Add transaction-based write-offs (marked as auto-generated)
-    const linkedTransactionIds = new Set(combined.manual.map((m) => m.id));
+    // Dedup: skip transactions already linked to a manual write-off via transaction_id
+    const linkedTransactionIds = new Set(
+      combined.manual.filter((m: any) => m.transaction_id).map((m: any) => m.transaction_id)
+    );
     for (const tx of combined.transactionBased) {
       // Don't double-count transactions already linked to manual write-offs
       if (!linkedTransactionIds.has(tx.id)) {

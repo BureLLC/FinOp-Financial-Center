@@ -296,8 +296,13 @@ export default function TaxCenterPage() {
   const quarterly = estimates.filter((e) => e.period_type === "quarterly").sort((a, b) => (a.quarter ?? 0) - (b.quarter ?? 0));
   const currentQuarter = Math.ceil((new Date().getMonth() + 1) / 3);
   const totalLiability = annual?.total_tax_liability ?? 0;
-  const effectiveRate = annual?.taxable_income && Number(annual.taxable_income) > 0
-    ? (totalLiability / Number(annual.taxable_income)) * 100 : 0;
+  // Use canonical taxable income for display; fall back to stale estimate only if canonical not loaded
+  const cti = canonicalTaxableIncome ?? { businessIncome: 0, deductibleExpenses: 0, taxableProfit: 0 };
+  const displayTaxableIncome = cti.taxableProfit > 0
+    ? cti.taxableProfit
+    : Number(annual?.taxable_income ?? 0);
+  const effectiveRate = displayTaxableIncome > 0
+    ? (totalLiability / displayTaxableIncome) * 100 : 0;
   const taxBreakdown = annual ? [
     { label: "Federal Income Tax",  value: Number(annual.income_tax),         color: "#38bdf8", rgb: "56,189,248" },
     { label: "Self-Employment Tax", value: Number(annual.self_employment_tax), color: "#a855f7", rgb: "168,85,247" },
@@ -486,7 +491,9 @@ export default function TaxCenterPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "24px" }}>
             {[
               { label: "Total Tax Liability", value: fmt(totalLiability),              color: "#ef4444", rgb: "239,68,68",   sub: "2026 annual estimate" },
-              { label: "Taxable Income",       value: fmt(annual?.taxable_income ?? 0), color: "#38bdf8", rgb: "56,189,248",  sub: "Business & rental only" },
+              { label: "Taxable Income",       value: fmt(displayTaxableIncome),        color: "#38bdf8", rgb: "56,189,248",  sub: "Business & rental only" },
+              { label: "Business Income",      value: fmt(cti.businessIncome), color: "#22c55e", rgb: "34,197,94", sub: "Gross business revenue" },
+              { label: "Deductible Expenses",  value: fmt(cti.deductibleExpenses), color: "#f97316", rgb: "249,115,22", sub: "Write-offs applied" },
               { label: "Effective Rate",       value: `${effectiveRate.toFixed(1)}%`,   color: "#f59e0b", rgb: "245,158,11", sub: "Of taxable income" },
               { label: "Balance Due",          value: fmt(annual?.balance_due ?? 0),    color: annual?.underpayment_flag ? "#ef4444" : "#22c55e", rgb: annual?.underpayment_flag ? "239,68,68" : "34,197,94", sub: annual?.underpayment_flag ? "⚠️ Underpayment" : "On track" },
               { label: "Tagged Income",        value: String(taggedIncomeCount),         color: "#a855f7", rgb: "168,85,247", sub: "Transactions tagged" },
