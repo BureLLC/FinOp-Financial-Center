@@ -92,21 +92,26 @@ serve(async (req) => {
     })
 
     if (!acctResult.ok) {
+      // Account fetch failed — update connection status to reflect sync failure
+      const connId = storedConn?.id
+      if (connId) {
+        await supabase.from("integration_connections").update({
+          sync_status: "error",
+          updated_at: new Date().toISOString(),
+          metadata: { last_sync_error: "account_fetch_failed", last_sync_error_at: new Date().toISOString() },
+        }).eq("id", connId)
+      }
       return json({ error: "Failed to fetch accounts", details: acctResult.data }, 500)
     }
 
     const accounts = Array.isArray(acctResult.data) ? acctResult.data : []
     console.log(`Fetched ${accounts.length} accounts`)
 
-    if (accounts.length === 0) {
-      return json({ success: true, message: "No accounts found", accountsCount: 0 })
-    }
-
-    // Get institution name from first account
-    const firstAcct = accounts[0] as Record<string, unknown>
+    // Get institution name from first account (or default)
+    const firstAcct = accounts.length > 0 ? accounts[0] as Record<string, unknown> : null
     const institutionName = firstAcct?.institution_name as string ?? "Brokerage"
 
-    // Find or create the connection record
+    // Find or create the connection record — do NOT set sync_status yet; derive it after sync
     let connectionId = storedConn?.id
     if (!connectionId) {
       const { data: newConn } = await supabase
@@ -118,7 +123,7 @@ serve(async (req) => {
           institution_name: institutionName,
           status: "active",
           connection_status: "active",
-          sync_status: "synced",
+          sync_status: "pending",
           external_id: authorizationId ?? null,
           config: { userSecret, snapTradeUserId: snapUserId },
           created_at: new Date().toISOString(),
@@ -127,23 +132,49 @@ serve(async (req) => {
         .select("id").single()
       connectionId = newConn?.id
     } else {
-      // Update existing connection with correct institution name
       await supabase.from("integration_connections").update({
         institution_name: institutionName,
         status: "active",
         connection_status: "active",
-        sync_status: "synced",
+        sync_status: "syncing",
         external_id: authorizationId ?? null,
-        last_synced: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq("id", connectionId)
     }
+
+    if (accounts.length === 0) {
+      // Connection exists but SnapTrade returned zero accounts — record this state
+      await supabase.from("integration_connections").update({
+        sync_status: "synced",
+        last_synced: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        metadata: { last_sync_result: "no_accounts_returned", last_sync_at: new Date().toISOString() },
+      }).eq("id", connectionId)
+      return json({
+        success: true,
+        message: "No accounts returned by brokerage",
+        accountsCount: 0,
+        syncStatus: "connected_no_accounts_returned",
+      })
+    }
+
+    // Track sync results per account for final status derivation
+    let totalAccountsSynced = 0
+    let totalPositionsSynced = 0
+    let accountsWithPositions = 0
+    let accountsMissingPositions = 0
+    let positionSyncErrors = 0
+
+    // Collect synced provider_account_ids to detect stale accounts from previous syncs
+    const syncedProviderAccountIds: string[] = []
 
     // Save each account
     for (const acct of accounts) {
       const a = acct as Record<string, unknown>
       const acctId = a?.id as string
       if (!acctId) continue
+
+      syncedProviderAccountIds.push(acctId)
 
       // Balance is in account.balance.total.amount
       const balanceObj = (a?.balance as Record<string, unknown>)?.total as Record<string, unknown>
@@ -191,11 +222,16 @@ serve(async (req) => {
       }
 
       if (existingAcct) {
-        await supabase.from("financial_accounts").update(acctRecord).eq("id", existingAcct.id)
+        // Reactivate if previously soft-deleted during reconnect
+        await supabase.from("financial_accounts").update({
+          ...acctRecord,
+          deleted_at: null,
+        }).eq("id", existingAcct.id)
       } else {
         await supabase.from("financial_accounts").insert({ ...acctRecord, created_at: new Date().toISOString() })
       }
 
+      totalAccountsSynced++
 
       const { data: resolvedAccount } = await supabase
         .from("financial_accounts")
@@ -213,7 +249,24 @@ serve(async (req) => {
         userId: snapUserId, userSecret,
       })
 
+      if (!posResult.ok) {
+        console.error(`Position fetch failed for account ${acctId}:`, posResult.status, posResult.data)
+        positionSyncErrors++
+        continue
+      }
+
       const positions = Array.isArray(posResult.data) ? posResult.data : []
+
+      if (positions.length === 0) {
+        accountsMissingPositions++
+        console.log(`Account ${acctId} returned 0 positions`)
+      } else {
+        accountsWithPositions++
+      }
+
+      // Collect synced position symbols to detect stale positions
+      const syncedSymbols: string[] = []
+
       for (const pos of positions) {
         const p = pos as Record<string, unknown>
         const symbolObj = p?.symbol as Record<string, unknown>
@@ -224,6 +277,8 @@ serve(async (req) => {
         const marketValue = (p?.market_value as number) ?? (quantity * price)
         const bookValue = (p?.book_value as number) ?? 0
         const unrealizedGain = marketValue - bookValue
+
+        syncedSymbols.push(symbol)
 
         const { data: existingPos } = await supabase
           .from("positions")
@@ -253,14 +308,89 @@ serve(async (req) => {
         }
 
         if (existingPos) {
-          await supabase.from("positions").update(posRecord).eq("id", existingPos.id)
+          await supabase.from("positions").update({ ...posRecord, deleted_at: null }).eq("id", existingPos.id)
         } else {
           await supabase.from("positions").insert({ ...posRecord, created_at: new Date().toISOString() })
+        }
+
+        totalPositionsSynced++
+      }
+
+      // Soft-delete positions for this account that were not in the latest sync
+      // (e.g. sold positions no longer returned by SnapTrade)
+      if (syncedSymbols.length > 0) {
+        await supabase
+          .from("positions")
+          .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+          .eq("user_id", user.id)
+          .eq("financial_account_id", financialAccountId)
+          .is("deleted_at", null)
+          .not("asset_symbol", "in", `(${syncedSymbols.map(s => `"${s}"`).join(",")})`)
+      }
+    }
+
+    // Soft-delete stale accounts from this connection that are no longer returned by SnapTrade
+    // (e.g. user closed an account at the brokerage)
+    if (syncedProviderAccountIds.length > 0) {
+      const { data: allConnAccounts } = await supabase
+        .from("financial_accounts")
+        .select("id, provider_account_id")
+        .eq("user_id", user.id)
+        .eq("provider", "snaptrade")
+        .eq("integration_connection_id", connectionId)
+        .is("deleted_at", null)
+
+      for (const acct of (allConnAccounts ?? [])) {
+        if (!syncedProviderAccountIds.includes(acct.provider_account_id)) {
+          console.log(`Soft-deleting stale account ${acct.provider_account_id}`)
+          const now = new Date().toISOString()
+          await supabase.from("financial_accounts").update({
+            is_active: false, deleted_at: now, updated_at: now,
+          }).eq("id", acct.id)
+          // Also soft-delete positions for the stale account
+          await supabase.from("positions").update({
+            deleted_at: now, updated_at: now,
+          }).eq("financial_account_id", acct.id).is("deleted_at", null)
         }
       }
     }
 
-    return json({ success: true, institutionName, accountsCount: accounts.length })
+    // Derive final sync_status from actual sync results
+    let finalSyncStatus = "synced"
+    const syncMetadata: Record<string, unknown> = {
+      last_sync_at: new Date().toISOString(),
+      accounts_synced: totalAccountsSynced,
+      positions_synced: totalPositionsSynced,
+      accounts_with_positions: accountsWithPositions,
+      accounts_missing_positions: accountsMissingPositions,
+      position_sync_errors: positionSyncErrors,
+    }
+
+    if (positionSyncErrors > 0 && accountsWithPositions === 0) {
+      finalSyncStatus = "error"
+      syncMetadata.last_sync_error = "position_fetch_failed_all_accounts"
+    } else if (positionSyncErrors > 0) {
+      // Partial success — some accounts synced positions, some failed
+      syncMetadata.last_sync_warning = "position_fetch_failed_some_accounts"
+    }
+
+    await supabase.from("integration_connections").update({
+      sync_status: finalSyncStatus,
+      last_synced: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      metadata: syncMetadata,
+    }).eq("id", connectionId)
+
+    return json({
+      success: true,
+      institutionName,
+      accountsCount: totalAccountsSynced,
+      positionsCount: totalPositionsSynced,
+      accountsWithPositions,
+      accountsMissingPositions,
+      positionSyncErrors,
+      syncStatus: finalSyncStatus,
+    })
 
   } catch (err) {
     console.error("snaptrade-sync error:", err)
