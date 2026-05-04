@@ -491,7 +491,7 @@ export default function SavingsPage() {
                 title="Reset total">↺</button>
             </div>
             <div style={{ fontSize: "22px", fontWeight: 800, color: "#22c55e" }}>{fmt(totalSaved)}</div>
-            <div style={{ fontSize: "10px", color: "#334155", marginTop: "4px" }}>Current across all goals{budgetSavingsTotal > 0 ? ` + ${fmtCompact(budgetSavingsTotal)}/mo budget` : ""}</div>
+            <div style={{ fontSize: "10px", color: "#334155", marginTop: "4px" }}>{totalSaved > 0 ? "Actual saved across all goals" : "No contributions yet"}{budgetSavingsTotal > 0 ? ` · ${fmtCompact(budgetSavingsTotal)}/mo planned` : ""}</div>
             <div style={{ marginTop: "10px", height: "2px", background: "rgba(34,197,94,0.3)", borderRadius: "1px" }} />
           </div>
           <div style={{ padding: "18px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "12px" }}>

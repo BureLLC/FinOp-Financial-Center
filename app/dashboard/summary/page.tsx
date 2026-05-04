@@ -208,7 +208,9 @@ export default function FinancialSummaryPage() {
     const totalInvestments = investments.total;
     const investmentsFromPositions = investments.fromPositions > 0;
     const totalLiabilities = balances.liabilities;
-    const netWorth = balances.netWorth;
+    // Net Worth must use canonical investment total (position-based if available)
+    // to match Home and Investments pages
+    const netWorth = totalCash + totalInvestments - totalLiabilities;
 
     const debtByType = debtAccounts.map((a) => {
       const style = getDebtColor(a.account_subtype ?? "other");
