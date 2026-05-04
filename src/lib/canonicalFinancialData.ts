@@ -343,14 +343,16 @@ export async function getCanonicalInvestments(
   userId: string
 ): Promise<CanonicalInvestments> {
   // Fetch active investment/brokerage accounts and positions in parallel
-  const [accountsSnapshot, activeInvestmentAcctsRes, positionsRes] = await Promise.all([
+  const [accountsSnapshot, investmentAcctsRes, positionsRes] = await Promise.all([
     getCanonicalAccountBalances(supabase, userId),
+    // Only fetch investment-type accounts (not bank/depository/credit)
     supabase
       .from("financial_accounts")
-      .select("id")
+      .select("id, account_type")
       .eq("user_id", userId)
       .eq("is_active", true)
-      .is("deleted_at", null),
+      .is("deleted_at", null)
+      .eq("account_type", "investment"),
     supabase
       .from("positions")
       .select("id, financial_account_id, asset_type, last_valuation, total_cost_basis, unrealized_gain, calculated_quantity")
@@ -358,24 +360,25 @@ export async function getCanonicalInvestments(
       .is("deleted_at", null),
   ]);
 
-  const activeAccountIds = new Set(
-    (activeInvestmentAcctsRes.data ?? []).map((a: any) => a.id)
+  const investmentAccountIds = new Set(
+    (investmentAcctsRes.data ?? []).map((a: any) => a.id)
   );
 
-  // Only include positions linked to active, non-deleted accounts
-  // This matches the Investment Portfolio page logic (generalized for all providers)
+  // Only include positions linked to active investment accounts
+  // This excludes cash positions from bank/depository accounts (e.g. Plaid cash sync)
+  // which belong in Total Cash, not Investments
   const positions = (positionsRes.data ?? []).filter(
-    (p: any) => p.financial_account_id && activeAccountIds.has(p.financial_account_id)
+    (p: any) => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
   );
   const fromAccounts = accountsSnapshot.investmentAccounts;
 
-  // Calculate total from positions if available
+  // Calculate total from investment positions (excludes bank cash positions)
   let fromPositions = 0;
   if (positions.length > 0) {
     fromPositions = positions.reduce((sum: number, p: any) => sum + toNum(p.last_valuation), 0);
   }
 
-  // Prefer positions if available, fallback to accounts
+  // Prefer positions if available, fallback to investment account balances
   const total = fromPositions > 0 ? fromPositions : fromAccounts;
 
   return {

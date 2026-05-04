@@ -325,9 +325,10 @@ export default function InvestmentsPage() {
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    // Include positions from ALL active accounts (any provider: SnapTrade, Plaid, manual, future integrations)
-    const { data: activeAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null);
-    const allowed = new Set((activeAccounts ?? []).map((a) => a.id));
+    // Only include positions from investment/brokerage accounts (not bank/depository/credit)
+    // Bank cash positions (e.g. Plaid-synced USD cash) belong in Total Cash, not Investments
+    const { data: investmentAccounts } = await supabase.from("financial_accounts").select("id").eq("user_id", user.id).eq("is_active", true).is("deleted_at", null).eq("account_type", "investment");
+    const allowed = new Set((investmentAccounts ?? []).map((a) => a.id));
 
     const { data } = await supabase
       .from("positions")
