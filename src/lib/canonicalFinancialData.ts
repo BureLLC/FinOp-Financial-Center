@@ -112,6 +112,8 @@ export interface CanonicalInvestments {
   positionsValue: number;
   /** Value from brokerage account current_balance (fallback) */
   fallbackBalanceValue: number;
+  /** Number of active brokerage connections */
+  brokerageConnectionCount: number;
   /** Number of active investment/brokerage accounts */
   brokerageAccountCount: number;
   /** Number of brokerage accounts that have positions */
@@ -462,10 +464,20 @@ export async function getCanonicalInvestments(
     );
   }
 
+  // Count active brokerage connections
+  const connectionsRes = await supabase
+    .from("integration_connections")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("provider", "snaptrade")
+    .neq("status", "deleted");
+  const brokerageConnectionCount = (connectionsRes.data ?? []).length;
+
   return {
     totalInvestmentValue,
     positionsValue,
     fallbackBalanceValue,
+    brokerageConnectionCount,
     brokerageAccountCount,
     brokerageAccountsWithPositions,
     brokerageAccountsUsingFallback,

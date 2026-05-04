@@ -15,6 +15,7 @@ interface Connection {
   sync_status: string;
   last_synced: string | null;
   created_at: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface Account {
@@ -27,6 +28,64 @@ interface Account {
   mask: string;
   account_currency: string;
   integration_connection_id: string;
+}
+
+interface PositionCount {
+  financial_account_id: string;
+  count: number;
+}
+
+/** Derive brokerage connection health from child data */
+function deriveBrokerageStatus(conn: Connection, connAccounts: Account[], positionCounts: PositionCount[]): {
+  label: string;
+  color: string;
+  bg: string;
+  warning?: string;
+} {
+  if (conn.provider !== "snaptrade") {
+    // Non-brokerage connections use sync_status directly
+    const map: Record<string, { label: string; color: string; bg: string }> = {
+      synced:  { label: "Synced", color: "#22c55e", bg: "rgba(34,197,94,0.1)" },
+      pending: { label: "Pending", color: "#f59e0b", bg: "rgba(245,158,11,0.1)" },
+      syncing: { label: "Syncing", color: "#38bdf8", bg: "rgba(56,189,248,0.1)" },
+      error:   { label: "Error", color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
+      never:   { label: "Never synced", color: "#475569", bg: "rgba(71,85,105,0.1)" },
+    };
+    return map[conn.sync_status] ?? map.never;
+  }
+
+  // Brokerage: derive from child data health
+  if (conn.sync_status === "error") {
+    return { label: "Sync Error", color: "#ef4444", bg: "rgba(239,68,68,0.1)", warning: "Last sync encountered an error" };
+  }
+  if (conn.sync_status === "syncing" || conn.sync_status === "pending") {
+    return { label: "Syncing…", color: "#38bdf8", bg: "rgba(56,189,248,0.1)" };
+  }
+  if (connAccounts.length === 0) {
+    if (conn.sync_status === "never") {
+      return { label: "Pending Sync", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Connection exists but accounts have not been synced yet" };
+    }
+    return { label: "No Accounts", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Brokerage returned no accounts — try re-syncing" };
+  }
+
+  // Check position health across accounts
+  const posCountMap = new Map(positionCounts.map(p => [p.financial_account_id, p.count]));
+  const acctIds = connAccounts.map(a => a.id);
+  const withPositions = acctIds.filter(id => (posCountMap.get(id) ?? 0) > 0).length;
+  const missingPositions = acctIds.length - withPositions;
+
+  if (withPositions > 0 && missingPositions === 0) {
+    return { label: "Synced", color: "#22c55e", bg: "rgba(34,197,94,0.1)" };
+  }
+  if (withPositions > 0 && missingPositions > 0) {
+    return { label: "Partial", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: `${missingPositions} account(s) missing positions` };
+  }
+  // No positions at all
+  const hasBalance = connAccounts.some(a => (a.current_balance ?? 0) > 0);
+  if (hasBalance) {
+    return { label: "No Positions", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Accounts synced but positions not yet available — using balance fallback" };
+  }
+  return { label: "Missing Data", color: "#ef4444", bg: "rgba(239,68,68,0.1)", warning: "Accounts synced but no positions or balances found" };
 }
 
 interface ConfirmModal {
@@ -76,6 +135,7 @@ export default function ConnectionsPage() {
   const router = useRouter();
   const [connections, setConnections] = useState<Connection[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [positionCounts, setPositionCounts] = useState<PositionCount[]>([]);
   const [loading, setLoading] = useState(true);
   const [mfaGate, setMfaGate] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -103,10 +163,10 @@ export default function ConnectionsPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const [connRes, acctRes] = await Promise.all([
+    const [connRes, acctRes, posRes] = await Promise.all([
       supabase
         .from("integration_connections")
-        .select("id, provider, institution_name, status, connection_status, sync_status, last_synced, created_at")
+        .select("id, provider, institution_name, status, connection_status, sync_status, last_synced, created_at, metadata")
         .eq("user_id", user.id)
         .neq("status", "deleted")
         .order("created_at", { ascending: false }),
@@ -116,7 +176,20 @@ export default function ConnectionsPage() {
         .eq("user_id", user.id)
         .eq("is_active", true)
         .is("deleted_at", null),
+      supabase
+        .from("positions")
+        .select("financial_account_id")
+        .eq("user_id", user.id)
+        .is("deleted_at", null),
     ]);
+
+    // Aggregate position counts per account
+    const posCounts = new Map<string, number>();
+    for (const p of (posRes.data ?? [])) {
+      const id = (p as { financial_account_id: string }).financial_account_id;
+      posCounts.set(id, (posCounts.get(id) ?? 0) + 1);
+    }
+    setPositionCounts(Array.from(posCounts.entries()).map(([financial_account_id, count]) => ({ financial_account_id, count })));
 
     setConnections(connRes.data ?? []);
     setAccounts(acctRes.data ?? []);
@@ -324,24 +397,14 @@ export default function ConnectionsPage() {
     });
   };
 
-  const syncStatusBadge = (status: string) => {
-    const map: Record<string, { label: string; color: string; bg: string }> = {
-      synced:     { label: "Synced",     color: "#22c55e", bg: "rgba(34,197,94,0.1)" },
-      pending:    { label: "Pending",    color: "#f59e0b", bg: "rgba(245,158,11,0.1)" },
-      syncing:    { label: "Syncing",    color: "#38bdf8", bg: "rgba(56,189,248,0.1)" },
-      error:      { label: "Error",      color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
-      never:      { label: "Never synced", color: "#475569", bg: "rgba(71,85,105,0.1)" },
-    };
-    const s = map[status] ?? map.never;
-    return (
-      <span style={{
-        fontSize: "11px", fontWeight: 600,
-        color: s.color, background: s.bg,
-        padding: "3px 8px", borderRadius: "99px",
-        border: `1px solid ${s.color}33`,
-      }}>{s.label}</span>
-    );
-  };
+  const statusBadge = (s: { label: string; color: string; bg: string }) => (
+    <span style={{
+      fontSize: "11px", fontWeight: 600,
+      color: s.color, background: s.bg,
+      padding: "3px 8px", borderRadius: "99px",
+      border: `1px solid ${s.color}33`,
+    }}>{s.label}</span>
+  );
 
   const accountsForConnection = (connectionId: string) => accounts.filter((a: Account) => a.integration_connection_id === connectionId);
 
@@ -534,8 +597,10 @@ export default function ConnectionsPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
             {connections.map((conn) => {
               const connAccounts = accountsForConnection(conn.id);
+              const derivedStatus = deriveBrokerageStatus(conn, connAccounts, positionCounts);
               const isSyncing = syncingId === conn.id;
               const isActing = actionLoading === conn.id;
+              const posCountMap = new Map(positionCounts.map(p => [p.financial_account_id, p.count]));
               return (
                 <div key={conn.id} style={{
                   background: "rgba(255,255,255,0.03)",
@@ -570,7 +635,7 @@ export default function ConnectionsPage() {
                           {conn.provider === "snaptrade" ? "Brokerage" : "Bank"} · via {conn.provider}
                         </span>
                         <span style={{ color: "#1e293b" }}>·</span>
-                        {syncStatusBadge(conn.sync_status)}
+                        {statusBadge(derivedStatus)}
                         {conn.last_synced && (
                           <>
                             <span style={{ color: "#1e293b" }}>·</span>
@@ -648,11 +713,24 @@ export default function ConnectionsPage() {
                     >{isActing ? "Working..." : "Delete"}</button>
                   </div>
 
+                  {/* Warning banner for brokerage connections */}
+                  {derivedStatus.warning && (
+                    <div style={{
+                      padding: "10px 20px",
+                      background: `${derivedStatus.bg}`,
+                      borderBottom: connAccounts.length > 0 ? "1px solid rgba(255,255,255,0.05)" : "none",
+                      display: "flex", alignItems: "center", gap: "8px",
+                    }}>
+                      <span style={{ fontSize: "13px" }}>⚠️</span>
+                      <span style={{ fontSize: "12px", color: derivedStatus.color }}>{derivedStatus.warning}</span>
+                    </div>
+                  )}
+
                   {/* Accounts under this connection */}
                   {connAccounts.length > 0 && (
                     <div style={{ padding: "12px 20px 16px" }}>
                       <div style={{ fontSize: "10px", fontWeight: 700, color: "#1e293b", letterSpacing: "0.1em", marginBottom: "10px" }}>
-                        ACCOUNTS
+                        ACCOUNTS ({connAccounts.length})
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                         {connAccounts.map((acct) => (
@@ -674,8 +752,19 @@ export default function ConnectionsPage() {
                                   {acct.account_name}
                                   {acct.mask && <span style={{ color: "#334155", marginLeft: "6px" }}>•••• {acct.mask}</span>}
                                 </div>
-                                <div style={{ fontSize: "11px", color: "#334155", textTransform: "capitalize" }}>
+                                <div style={{ fontSize: "11px", color: "#334155", textTransform: "capitalize", display: "flex", alignItems: "center", gap: "6px" }}>
                                   {acct.account_subtype ?? acct.account_type}
+                                  {acct.account_type === "investment" && (
+                                    <span style={{
+                                      fontSize: "10px",
+                                      color: (posCountMap.get(acct.id) ?? 0) > 0 ? "#22c55e" : "#f59e0b",
+                                      fontWeight: 600,
+                                    }}>
+                                      {(posCountMap.get(acct.id) ?? 0) > 0
+                                        ? `${posCountMap.get(acct.id)} position(s)`
+                                        : "no positions"}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             </div>

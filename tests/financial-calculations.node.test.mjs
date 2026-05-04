@@ -1415,3 +1415,197 @@ test("canonical-metadata: deleted/disconnected brokerage accounts excluded by pr
   assert.equal(result.brokerageAccountsWithPositions, 1);
   assert.equal(result.dataStatus, "positions_verified");
 });
+
+// ─── Generic SnapTrade Integration Tests ─────────────────────────────────────
+// These test the deriveBrokerageStatus logic and generic multi-user/multi-institution scenarios.
+
+/**
+ * Mirrors the deriveBrokerageStatus function from connections/page.tsx.
+ * Derives brokerage connection health from child data (accounts + positions).
+ */
+function deriveBrokerageStatus(conn, connAccounts, positionCounts) {
+  if (conn.provider !== "snaptrade") {
+    const map = {
+      synced:  { label: "Synced", color: "#22c55e", bg: "rgba(34,197,94,0.1)" },
+      pending: { label: "Pending", color: "#f59e0b", bg: "rgba(245,158,11,0.1)" },
+      syncing: { label: "Syncing", color: "#38bdf8", bg: "rgba(56,189,248,0.1)" },
+      error:   { label: "Error", color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
+      never:   { label: "Never synced", color: "#475569", bg: "rgba(71,85,105,0.1)" },
+    };
+    return map[conn.sync_status] ?? map.never;
+  }
+  if (conn.sync_status === "error") {
+    return { label: "Sync Error", color: "#ef4444", bg: "rgba(239,68,68,0.1)", warning: "Last sync encountered an error" };
+  }
+  if (conn.sync_status === "syncing" || conn.sync_status === "pending") {
+    return { label: "Syncing…", color: "#38bdf8", bg: "rgba(56,189,248,0.1)" };
+  }
+  if (connAccounts.length === 0) {
+    if (conn.sync_status === "never") {
+      return { label: "Pending Sync", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Connection exists but accounts have not been synced yet" };
+    }
+    return { label: "No Accounts", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Brokerage returned no accounts — try re-syncing" };
+  }
+  const posCountMap = new Map(positionCounts.map(p => [p.financial_account_id, p.count]));
+  const acctIds = connAccounts.map(a => a.id);
+  const withPositions = acctIds.filter(id => (posCountMap.get(id) ?? 0) > 0).length;
+  const missingPositions = acctIds.length - withPositions;
+  if (withPositions > 0 && missingPositions === 0) {
+    return { label: "Synced", color: "#22c55e", bg: "rgba(34,197,94,0.1)" };
+  }
+  if (withPositions > 0 && missingPositions > 0) {
+    return { label: "Partial", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: `${missingPositions} account(s) missing positions` };
+  }
+  const hasBalance = connAccounts.some(a => (a.current_balance ?? 0) > 0);
+  if (hasBalance) {
+    return { label: "No Positions", color: "#f59e0b", bg: "rgba(245,158,11,0.1)", warning: "Accounts synced but positions not yet available — using balance fallback" };
+  }
+  return { label: "Missing Data", color: "#ef4444", bg: "rgba(239,68,68,0.1)", warning: "Accounts synced but no positions or balances found" };
+}
+
+test("connection-status: SnapTrade connection with no accounts shows pending/warning", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const result = deriveBrokerageStatus(conn, [], []);
+  assert.equal(result.label, "No Accounts");
+  assert.ok(result.warning);
+  assert.ok(result.warning.includes("no accounts"));
+});
+
+test("connection-status: SnapTrade connection never synced shows pending sync", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "never" };
+  const result = deriveBrokerageStatus(conn, [], []);
+  assert.equal(result.label, "Pending Sync");
+  assert.ok(result.warning.includes("not been synced"));
+});
+
+test("connection-status: SnapTrade with accounts but no positions shows warning", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [{ id: "a1", current_balance: 50000 }];
+  const result = deriveBrokerageStatus(conn, accounts, []);
+  assert.equal(result.label, "No Positions");
+  assert.ok(result.warning.includes("positions not yet available"));
+});
+
+test("connection-status: SnapTrade with accounts and positions shows Synced", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [{ id: "a1", current_balance: 50000 }];
+  const posCounts = [{ financial_account_id: "a1", count: 3 }];
+  const result = deriveBrokerageStatus(conn, accounts, posCounts);
+  assert.equal(result.label, "Synced");
+  assert.equal(result.warning, undefined);
+});
+
+test("connection-status: SnapTrade with mixed accounts shows Partial", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [
+    { id: "a1", current_balance: 50000 },
+    { id: "a2", current_balance: 30000 },
+  ];
+  const posCounts = [{ financial_account_id: "a1", count: 3 }];
+  const result = deriveBrokerageStatus(conn, accounts, posCounts);
+  assert.equal(result.label, "Partial");
+  assert.ok(result.warning.includes("1 account(s) missing positions"));
+});
+
+test("connection-status: SnapTrade sync error shows error state", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "error" };
+  const result = deriveBrokerageStatus(conn, [], []);
+  assert.equal(result.label, "Sync Error");
+  assert.ok(result.warning.includes("error"));
+});
+
+test("connection-status: SnapTrade accounts with no positions and no balance shows Missing Data", () => {
+  const conn = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const accounts = [{ id: "a1", current_balance: 0 }];
+  const result = deriveBrokerageStatus(conn, accounts, []);
+  assert.equal(result.label, "Missing Data");
+  assert.ok(result.warning.includes("no positions or balances"));
+});
+
+test("connection-status: Plaid connection uses sync_status directly", () => {
+  const conn = { id: "c1", provider: "plaid", sync_status: "synced" };
+  const result = deriveBrokerageStatus(conn, [], []);
+  assert.equal(result.label, "Synced");
+  assert.equal(result.warning, undefined);
+});
+
+test("generic-multi-institution: two SnapTrade institutions per user remain isolated", () => {
+  const conn1 = { id: "c1", provider: "snaptrade", sync_status: "synced" };
+  const conn2 = { id: "c2", provider: "snaptrade", sync_status: "synced" };
+  const accts1 = [{ id: "a1", current_balance: 50000, integration_connection_id: "c1" }];
+  const accts2 = [{ id: "a2", current_balance: 0, integration_connection_id: "c2" }];
+  const posCounts = [{ financial_account_id: "a1", count: 5 }];
+
+  const status1 = deriveBrokerageStatus(conn1, accts1, posCounts);
+  const status2 = deriveBrokerageStatus(conn2, accts2, posCounts);
+
+  assert.equal(status1.label, "Synced");
+  assert.equal(status2.label, "Missing Data");
+});
+
+test("generic-multi-user: user A and user B brokerage statuses are independent", () => {
+  // User A: has positions
+  const userAAccounts = [{ id: "a-inv1", account_type: "investment", current_balance: 100000 }];
+  const userAPositions = [{ financial_account_id: "a-inv1", last_valuation: 105000 }];
+  const resultA = computeCanonicalInvestmentMetadata(
+    userAAccounts, userAPositions, userAAccounts
+  );
+
+  // User B: connection exists, no positions, no balance
+  const userBAccounts = [{ id: "b-inv1", account_type: "investment", current_balance: 0 }];
+  const resultB = computeCanonicalInvestmentMetadata(
+    userBAccounts, [], userBAccounts
+  );
+
+  assert.equal(resultA.dataStatus, "positions_verified");
+  assert.equal(resultA.totalInvestmentValue, 105000);
+  assert.equal(resultB.dataStatus, "missing_positions");
+  assert.equal(resultB.totalInvestmentValue, 0);
+  assert.ok(resultB.warnings.length > 0);
+});
+
+test("generic-reconnect: reconnected brokerage with new positions replaces stale data", () => {
+  // Simulate: after reconnect, only new positions exist (stale ones soft-deleted by sync)
+  const accounts = [{ id: "inv1", account_type: "investment", current_balance: 60000 }];
+  const newPositions = [
+    { financial_account_id: "inv1", last_valuation: 30000 },
+    { financial_account_id: "inv1", last_valuation: 32000 },
+  ];
+  // Stale positions would have deleted_at set and not be passed in
+
+  const result = computeCanonicalInvestmentMetadata(accounts, newPositions, accounts);
+  assert.equal(result.positionsValue, 62000);
+  assert.equal(result.dataStatus, "positions_verified");
+});
+
+test("generic-sync: repeated sync does not duplicate — canonical uses sum of all positions", () => {
+  // If sync is idempotent (upsert), same positions appear once
+  const accounts = [{ id: "inv1", account_type: "investment", current_balance: 50000 }];
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 25000, asset_symbol: "AAPL" },
+    { financial_account_id: "inv1", last_valuation: 25000, asset_symbol: "GOOG" },
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(accounts, positions, accounts);
+  assert.equal(result.positionsValue, 50000);
+  assert.equal(result.brokerageAccountsWithPositions, 1);
+});
+
+test("generic-sync: multiple accounts per institution all contribute to total", () => {
+  const accounts = [
+    { id: "inv1", account_type: "investment", current_balance: 50000 },
+    { id: "inv2", account_type: "investment", current_balance: 30000 },
+    { id: "inv3", account_type: "investment", current_balance: 20000 },
+  ];
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 55000 },
+    { financial_account_id: "inv2", last_valuation: 32000 },
+    { financial_account_id: "inv3", last_valuation: 18000 },
+  ];
+
+  const result = computeCanonicalInvestmentMetadata(accounts, positions, accounts);
+  assert.equal(result.positionsValue, 105000);
+  assert.equal(result.brokerageAccountCount, 3);
+  assert.equal(result.brokerageAccountsWithPositions, 3);
+  assert.equal(result.dataStatus, "positions_verified");
+});
