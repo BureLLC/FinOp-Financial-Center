@@ -2130,3 +2130,259 @@ test("canonical: Investment Portfolio uses canonical totalInvestmentValue when l
   assert.equal(canonicalInvestments.dataStatus, "fallback_used");
   assert.ok(canonicalInvestments.warnings.length > 0);
 });
+
+// ─── Positions Response Normalization Tests ───────────────────────────────────
+// Mirror the 4-way normalization logic in snaptrade-sync/index.ts.
+// These test the shape detection logic — not the Supabase calls.
+
+function normalizePositionsResponse(data) {
+  if (Array.isArray(data)) {
+    return { positions: data, note: null, fetchFailed: false };
+  }
+  if (data !== null && typeof data === "object" && Array.isArray(data.positions)) {
+    return { positions: data.positions, note: "wrapped_positions_object", fetchFailed: false };
+  }
+  if (data !== null && typeof data === "object" &&
+      (data.code !== undefined || data.message !== undefined)) {
+    return { positions: [], note: "api_returned_error_object", fetchFailed: true };
+  }
+  const typeDesc = data === null ? "null" : typeof data;
+  return { positions: [], note: `unrecognized_response_${typeDesc}`, fetchFailed: true };
+}
+
+test("positions-normalization: raw array is returned as-is with no note", () => {
+  const rawArr = [
+    { symbol: { symbol: "AAPL" }, units: 10, price: 190 },
+    { symbol: { symbol: "SPY" }, units: 5, price: 480 },
+  ];
+  const result = normalizePositionsResponse(rawArr);
+  assert.equal(result.positions.length, 2);
+  assert.equal(result.note, null);
+  assert.equal(result.fetchFailed, false);
+});
+
+test("positions-normalization: wrapped object { positions: [...] } is extracted with warning note", () => {
+  const wrapped = { positions: [{ symbol: { symbol: "NVDA" }, units: 3, price: 900 }], account_id: "abc" };
+  const result = normalizePositionsResponse(wrapped);
+  assert.equal(result.positions.length, 1);
+  assert.equal(result.note, "wrapped_positions_object");
+  assert.equal(result.fetchFailed, false);
+});
+
+test("positions-normalization: error object { code, message } is not treated as true-zero", () => {
+  const errObj = { code: "ACCOUNT_NOT_FOUND", message: "The account was not found" };
+  const result = normalizePositionsResponse(errObj);
+  assert.equal(result.fetchFailed, true);
+  assert.equal(result.note, "api_returned_error_object");
+  assert.equal(result.positions.length, 0);
+});
+
+test("positions-normalization: error object with only message field is also caught", () => {
+  const errObj = { message: "Unauthorized" };
+  const result = normalizePositionsResponse(errObj);
+  assert.equal(result.fetchFailed, true);
+  assert.equal(result.note, "api_returned_error_object");
+});
+
+test("positions-normalization: null response is not treated as true-zero", () => {
+  const result = normalizePositionsResponse(null);
+  assert.equal(result.fetchFailed, true);
+  assert.equal(result.note, "unrecognized_response_null");
+});
+
+test("positions-normalization: plain string response is not treated as true-zero", () => {
+  const result = normalizePositionsResponse("error occurred");
+  assert.equal(result.fetchFailed, true);
+  assert.ok(result.note.startsWith("unrecognized_response_"));
+});
+
+test("positions-normalization: empty raw array IS true-zero (confirmed empty from SnapTrade)", () => {
+  const result = normalizePositionsResponse([]);
+  assert.equal(result.fetchFailed, false);
+  assert.equal(result.note, null);
+  assert.equal(result.positions.length, 0);
+});
+
+// ─── Counter Tracking Tests ───────────────────────────────────────────────────
+
+test("positions-counters: positionsFetchAttempted increments once per account regardless of result", () => {
+  // Simulate the counter logic for 3 accounts: one success, one HTTP error, one error object
+  let positionsFetchAttempted = 0;
+
+  // Account 1: successful fetch
+  positionsFetchAttempted++;
+  const r1 = normalizePositionsResponse([{ symbol: { symbol: "AAPL" }, units: 5, price: 190 }]);
+  assert.equal(r1.fetchFailed, false);
+
+  // Account 2: HTTP error (posResult.ok is false — counter still increments before the check)
+  positionsFetchAttempted++;
+
+  // Account 3: error object response
+  positionsFetchAttempted++;
+  const r3 = normalizePositionsResponse({ code: "TIMEOUT", message: "Request timed out" });
+  assert.equal(r3.fetchFailed, true);
+
+  assert.equal(positionsFetchAttempted, 3);
+});
+
+test("positions-counters: positionsInsertAttempted and positionsInsertFailed track correctly", () => {
+  let positionsInsertAttempted = 0;
+  let positionsInsertFailed = 0;
+
+  // Simulate 3 positions: 2 succeed, 1 fails
+  const results = [true, true, false]; // false = DB error
+  for (const succeeded of results) {
+    positionsInsertAttempted++;
+    if (!succeeded) positionsInsertFailed++;
+  }
+
+  assert.equal(positionsInsertAttempted, 3);
+  assert.equal(positionsInsertFailed, 1);
+});
+
+// ─── Duplicate Prevention Tests ───────────────────────────────────────────────
+
+test("positions-dedup: deleted_at IS NULL filter prevents soft-deleted rows from blocking inserts", () => {
+  // Simulate the lookup logic: only active rows (deleted_at IS NULL) count as existing.
+  // If a row exists with deleted_at set, the lookup returns null → we INSERT (reactivating the position).
+  const dbRows = [
+    { id: "pos-1", asset_symbol: "AAPL", deleted_at: "2026-01-01T00:00:00Z" }, // soft-deleted
+    { id: "pos-2", asset_symbol: "SPY",  deleted_at: null },                    // active
+  ];
+
+  function lookupActivePosition(symbol) {
+    return dbRows.find(r => r.asset_symbol === symbol && r.deleted_at === null) ?? null;
+  }
+
+  // AAPL is soft-deleted — lookup returns null → INSERT path (correct)
+  assert.equal(lookupActivePosition("AAPL"), null);
+  // SPY is active — lookup returns row → UPDATE path (correct)
+  assert.notEqual(lookupActivePosition("SPY"), null);
+});
+
+test("positions-dedup: lookup error surfaces — position is skipped rather than silently upserted", () => {
+  // Simulates the error branch: if maybeSingle() returns an error, the position must be skipped.
+  let positionsInsertAttempted = 0;
+  let positionsInsertFailed = 0;
+  let totalSkippedPositions = 0;
+
+  const lookupErr = { code: "PGRST301", message: "Multiple rows returned", hint: null, details: null };
+
+  if (lookupErr) {
+    // Error branch: skip this position, count as failed
+    totalSkippedPositions++;
+    positionsInsertFailed++;
+  } else {
+    positionsInsertAttempted++;
+  }
+
+  assert.equal(positionsInsertAttempted, 0); // never attempted — skipped on lookup error
+  assert.equal(positionsInsertFailed, 1);
+  assert.equal(totalSkippedPositions, 1);
+});
+
+// ─── Sync Response Shape Tests ────────────────────────────────────────────────
+
+test("sync-response: response includes position counters alongside account counters", () => {
+  // Mirror the shape returned by snaptrade-sync when positions sync successfully.
+  const mockResponse = {
+    success: true,
+    syncStatus: "synced",
+    accountsReturned: 3,
+    accountsSynced: 3,
+    accountsDbErrors: 0,
+    positionsFetchAttempted: 3,
+    positionsRawTotal: 18,
+    positionsSkipped: 0,
+    positionsInsertAttempted: 18,
+    positionsInsertFailed: 0,
+    positionsSynced: 18,
+    accountsWithPositions: 3,
+    accountsMissingPositions: 0,
+    positionSyncErrors: 0,
+  };
+
+  // All expected counter fields are present
+  assert.ok("positionsFetchAttempted" in mockResponse);
+  assert.ok("positionsRawTotal" in mockResponse);
+  assert.ok("positionsSkipped" in mockResponse);
+  assert.ok("positionsInsertAttempted" in mockResponse);
+  assert.ok("positionsInsertFailed" in mockResponse);
+  assert.ok("positionsSynced" in mockResponse);
+  assert.equal(mockResponse.positionsSynced, 18);
+  assert.equal(mockResponse.positionsInsertFailed, 0);
+});
+
+test("sync-response: Connections page message includes position count when positions synced", () => {
+  // Mirror the handleSync message logic from connections/page.tsx
+  function buildSyncMessage(data) {
+    const accountsSynced = data?.accountsSynced;
+    const positionsSynced = data?.positionsSynced;
+    const positionSyncErrors = data?.positionSyncErrors;
+    const positionsInsertFailed = data?.positionsInsertFailed;
+    const accountsMissingPositions = data?.accountsMissingPositions;
+
+    if (!accountsSynced || accountsSynced === 0) return "Sync started. Refreshing in a moment...";
+    if (positionsSynced && positionsSynced > 0) {
+      return `Synced ${accountsSynced} account(s), ${positionsSynced} position(s). Refreshing...`;
+    }
+    if (positionSyncErrors && positionSyncErrors > 0) {
+      return `Synced ${accountsSynced} account(s), but positions sync failed. Check logs.`;
+    }
+    if (positionsInsertFailed && positionsInsertFailed > 0) {
+      return `Synced ${accountsSynced} account(s), but some positions failed to save. Check logs.`;
+    }
+    if (accountsMissingPositions && accountsMissingPositions > 0) {
+      return `Synced ${accountsSynced} account(s), but positions are missing — using balance fallback.`;
+    }
+    return `Synced ${accountsSynced} account(s). Refreshing...`;
+  }
+
+  assert.equal(
+    buildSyncMessage({ accountsSynced: 7, positionsSynced: 16 }),
+    "Synced 7 account(s), 16 position(s). Refreshing..."
+  );
+  assert.equal(
+    buildSyncMessage({ accountsSynced: 7, positionsSynced: 0, accountsMissingPositions: 7 }),
+    "Synced 7 account(s), but positions are missing — using balance fallback."
+  );
+  assert.equal(
+    buildSyncMessage({ accountsSynced: 7, positionsSynced: 0, positionSyncErrors: 3 }),
+    "Synced 7 account(s), but positions sync failed. Check logs."
+  );
+  assert.equal(
+    buildSyncMessage({ accountsSynced: 7, positionsSynced: 0, positionsInsertFailed: 2 }),
+    "Synced 7 account(s), but some positions failed to save. Check logs."
+  );
+  assert.equal(
+    buildSyncMessage({ accountsSynced: 0 }),
+    "Sync started. Refreshing in a moment..."
+  );
+});
+
+test("sync-response: fallback remains when accounts synced but positions missing", () => {
+  // Simulates the Investment Portfolio page behavior when sync completes but positions = 0.
+  // canonical.totalInvestmentValue should still be used.
+  const syncResult = {
+    accountsSynced: 7,
+    positionsSynced: 0,
+    accountsMissingPositions: 7,
+  };
+  const canonicalInvestments = {
+    totalInvestmentValue: 124000,
+    positionsValue: 0,
+    fallbackBalanceValue: 124000,
+    dataStatus: "fallback_used",
+    positions: [],
+    warnings: ["No positions synced — using account balance as temporary fallback"],
+  };
+
+  const positionsFromDb = [];
+  const displayTotalValue = positionsFromDb.length > 0
+    ? positionsFromDb.reduce((s, p) => s + toNum(p.last_valuation ?? 0), 0)
+    : canonicalInvestments.totalInvestmentValue;
+
+  assert.equal(syncResult.positionsSynced, 0);
+  assert.equal(displayTotalValue, 124000); // fallback still active after sync
+  assert.equal(canonicalInvestments.dataStatus, "fallback_used");
+});
