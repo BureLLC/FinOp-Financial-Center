@@ -261,6 +261,21 @@ serve(async (req) => {
       })
     }
 
+    // Clean up positions where asset_symbol was incorrectly stored as a JSON object string
+    // (old sync code stored the entire SnapTrade symbol object instead of symbol.symbol string).
+    // These rows are already soft-deleted in practice but this handles any edge cases.
+    const { error: jsonCleanupErr } = await supabase
+      .from("positions")
+      .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("user_id", user.id)
+      .like("asset_symbol", "{%")
+      .is("deleted_at", null)
+    if (jsonCleanupErr) {
+      console.warn("[snaptrade-sync] JSON-format position cleanup failed:", jsonCleanupErr.message)
+    } else {
+      console.log("[snaptrade-sync] JSON-format position cleanup: complete")
+    }
+
     // ── Per-account sync ──────────────────────────────────────────────────────
     let totalAccountsSynced = 0
     let totalPositionsSynced = 0
@@ -413,6 +428,15 @@ serve(async (req) => {
       const positions = Array.isArray(posResult.data) ? posResult.data : []
       console.log(`[snaptrade-sync] Positions for account ${acctId}: ${positions.length}`)
 
+      // Log first position shape to verify parser matches actual SnapTrade response
+      if (positions.length > 0) {
+        const firstPos = positions[0] as Record<string, unknown>
+        const symObj = firstPos?.symbol as Record<string, unknown> | undefined
+        console.log(`[snaptrade-sync] First position keys: [${Object.keys(firstPos).join(", ")}]`)
+        console.log(`[snaptrade-sync] First position.symbol keys: [${symObj ? Object.keys(symObj).join(", ") : "n/a"}]`)
+        console.log(`[snaptrade-sync] Field check: units=${firstPos?.units !== undefined} | price=${firstPos?.price !== undefined} | average_purchase_price=${firstPos?.average_purchase_price !== undefined} | open_pnl=${firstPos?.open_pnl !== undefined} | market_value=${firstPos?.market_value !== undefined}`)
+      }
+
       if (positions.length === 0) {
         accountsMissingPositions++
       } else {
@@ -427,10 +451,15 @@ serve(async (req) => {
         const symbolObj = p?.symbol as Record<string, unknown>
         const symbol = symbolObj?.symbol as string ?? "UNKNOWN"
         const description = symbolObj?.description as string ?? symbol
-        const quantity = p?.units as number ?? 0
-        const price = p?.price as number ?? 0
+        // Derive asset_type from SnapTrade symbol type code; normalize mutual_fund → etf
+        const rawTypeCode = ((symbolObj?.type as Record<string, unknown>)?.code as string ?? "equity").toLowerCase()
+        const assetType = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode
+        const quantity = (p?.units as number) ?? 0
+        const price = (p?.price as number) ?? 0
+        // SnapTrade returns average_purchase_price (per-unit cost), not a total book_value field
+        const avgPurchasePrice = (p?.average_purchase_price as number) ?? price
+        const bookValue = avgPurchasePrice * quantity
         const marketValue = (p?.market_value as number) ?? (quantity * price)
-        const bookValue = (p?.book_value as number) ?? 0
         const unrealizedGain = marketValue - bookValue
 
         syncedSymbols.push(symbol)
@@ -449,10 +478,10 @@ serve(async (req) => {
           financial_account_id: financialAccountId,
           asset_symbol: symbol,
           asset_name: description,
-          asset_type: "equity",
+          asset_type: assetType,
           currency: currency.substring(0, 3),
           calculated_quantity: quantity,
-          average_cost_basis: quantity > 0 ? bookValue / quantity : 0,
+          average_cost_basis: avgPurchasePrice,
           total_cost_basis: bookValue,
           last_price: price,
           last_valuation: marketValue,

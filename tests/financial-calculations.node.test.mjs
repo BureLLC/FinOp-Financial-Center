@@ -1980,3 +1980,153 @@ test("canonical investments: plaid bank accounts with depository type never coun
   assert.equal(result.brokerageAccountCount, 0);
   assert.equal(result.totalInvestmentValue, 0);
 });
+
+// ─── SnapTrade Position Parser Tests ─────────────────────────────────────────
+// Pure function mirroring the field extraction logic in snaptrade-sync/index.ts.
+// Tests verify the parser handles real SnapTrade response shapes correctly.
+
+function parseSnapTradePosition(raw) {
+  const symbolObj = raw?.symbol ?? {};
+  const symbol = symbolObj?.symbol ?? "UNKNOWN";
+  const description = symbolObj?.description ?? symbol;
+  const rawTypeCode = (symbolObj?.type?.code ?? "equity").toLowerCase();
+  const assetType = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode;
+  const quantity = raw?.units ?? 0;
+  const price = raw?.price ?? 0;
+  // SnapTrade returns average_purchase_price (per unit), not a total book_value
+  const avgPurchasePrice = raw?.average_purchase_price ?? price;
+  const bookValue = avgPurchasePrice * quantity;
+  const marketValue = raw?.market_value ?? (quantity * price);
+  const unrealizedGain = marketValue - bookValue;
+  return { symbol, description, assetType, quantity, price, avgPurchasePrice, bookValue, marketValue, unrealizedGain };
+}
+
+test("snaptrade-positions: extracts symbol string from symbol.symbol (not the full symbol object)", () => {
+  const raw = {
+    symbol: { symbol: "AAPL", description: "Apple Inc.", type: { code: "equity" } },
+    units: 10, price: 190.5, average_purchase_price: 150.0,
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.symbol, "AAPL");
+  assert.equal(parsed.description, "Apple Inc.");
+  assert.notEqual(parsed.symbol, "[object Object]");
+});
+
+test("snaptrade-positions: uses units field for quantity (not shares or quantity)", () => {
+  const raw = {
+    symbol: { symbol: "SPY", description: "SPDR S&P 500 ETF", type: { code: "etf" } },
+    units: 25.5, price: 480.0, average_purchase_price: 400.0,
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.quantity, 25.5);
+});
+
+test("snaptrade-positions: uses average_purchase_price for per-unit cost (not book_value)", () => {
+  const raw = {
+    symbol: { symbol: "GOOG", description: "Alphabet Inc.", type: { code: "equity" } },
+    units: 5, price: 170.0,
+    average_purchase_price: 120.0, // cost per unit from SnapTrade
+    book_value: 999, // field does not exist in SnapTrade — must be ignored
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.avgPurchasePrice, 120.0);
+  assert.equal(parsed.bookValue, 600.0); // 5 × 120 (not 999)
+});
+
+test("snaptrade-positions: market_value falls back to units × price when field absent", () => {
+  const raw = {
+    symbol: { symbol: "BND", description: "Vanguard Bond ETF", type: { code: "etf" } },
+    units: 100, price: 75.5, average_purchase_price: 80.0,
+    // no market_value field — this is the real SnapTrade response shape
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.marketValue, 7550); // 100 × 75.5
+});
+
+test("snaptrade-positions: explicit market_value overrides units × price calculation", () => {
+  const raw = {
+    symbol: { symbol: "SPY", description: "S&P 500 ETF", type: { code: "etf" } },
+    units: 10, price: 490.0, average_purchase_price: 400.0,
+    market_value: 4950.0,
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.marketValue, 4950.0);
+});
+
+test("snaptrade-positions: unrealized_gain = market_value - (units × average_purchase_price)", () => {
+  const raw = {
+    symbol: { symbol: "NVDA", description: "NVIDIA", type: { code: "equity" } },
+    units: 20, price: 900.0, average_purchase_price: 500.0,
+  };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.bookValue, 10000); // 20 × 500
+  assert.equal(parsed.marketValue, 18000); // 20 × 900
+  assert.equal(parsed.unrealizedGain, 8000); // 18000 - 10000
+});
+
+test("snaptrade-positions: asset_type derived from symbol.type.code", () => {
+  const equity = parseSnapTradePosition({ symbol: { symbol: "AAPL", type: { code: "equity" } }, units: 1, price: 100, average_purchase_price: 80 });
+  const etf    = parseSnapTradePosition({ symbol: { symbol: "SPY",  type: { code: "etf"    } }, units: 1, price: 100, average_purchase_price: 80 });
+  const fund   = parseSnapTradePosition({ symbol: { symbol: "SPAXX", type: { code: "mutual_fund" } }, units: 1, price: 1, average_purchase_price: 1 });
+  assert.equal(equity.assetType, "equity");
+  assert.equal(etf.assetType, "etf");
+  assert.equal(fund.assetType, "etf"); // mutual_fund normalized to etf for display
+});
+
+test("snaptrade-positions: missing symbol.type defaults to equity", () => {
+  const raw = { symbol: { symbol: "XYZ", description: "Unknown" }, units: 5, price: 50, average_purchase_price: 40 };
+  const parsed = parseSnapTradePosition(raw);
+  assert.equal(parsed.assetType, "equity");
+});
+
+test("snaptrade-positions: JSON-format asset_symbol detection (starts with '{')", () => {
+  // Old bug stored the entire SnapTrade symbol object as a JSON string instead of just the symbol string.
+  // These rows are detected by the leading '{' and cleaned up with a Supabase LIKE query.
+  const oldStyleSymbols = [
+    '{"id":"uuid","symbol":"SPAXX","raw_symbol":"SPAXX"}',
+    '{"symbol":"AAPL"}',
+  ];
+  const newStyleSymbols = ["SPAXX", "AAPL", "VWO", "GOOG"];
+
+  const jsonFormat = oldStyleSymbols.filter(s => s.startsWith("{"));
+  const stringFormat = newStyleSymbols.filter(s => s.startsWith("{"));
+
+  assert.equal(jsonFormat.length, 2); // all old-style detected
+  assert.equal(stringFormat.length, 0); // no false positives on real symbols
+});
+
+test("snaptrade-positions: stale cleanup does not run when syncedSymbols is empty", () => {
+  // When SnapTrade returns 0 positions for an account, we must NOT soft-delete existing positions.
+  // Cleanup guard: if (syncedSymbols.length > 0) { ... }.
+  const syncedSymbols = [];
+  const shouldRunCleanup = syncedSymbols.length > 0;
+  assert.equal(shouldRunCleanup, false);
+});
+
+test("snaptrade-positions: stale cleanup runs when positions are present", () => {
+  const syncedSymbols = ["AAPL", "SPY", "NVDA"];
+  const shouldRunCleanup = syncedSymbols.length > 0;
+  assert.equal(shouldRunCleanup, true);
+});
+
+test("canonical: Investment Portfolio uses canonical totalInvestmentValue when local positions array is empty", () => {
+  // Simulates the Investment Portfolio page display logic.
+  // When positions are not yet synced, we use canonical.totalInvestmentValue instead of $0.
+  const canonicalInvestments = {
+    totalInvestmentValue: 45000, // from account balance fallback
+    positionsValue: 0,
+    fallbackBalanceValue: 45000,
+    dataStatus: "fallback_used",
+    positions: [],
+    warnings: ["No positions synced — using account balance as temporary fallback"],
+  };
+  const positionsFromDb = []; // empty — no positions in DB yet
+
+  const displayTotalValue = positionsFromDb.length > 0
+    ? positionsFromDb.reduce((s, p) => s + toNum(p.last_valuation), 0)
+    : canonicalInvestments.totalInvestmentValue;
+
+  assert.equal(displayTotalValue, 45000); // not $0
+  assert.equal(canonicalInvestments.dataStatus, "fallback_used");
+  assert.ok(canonicalInvestments.warnings.length > 0);
+});

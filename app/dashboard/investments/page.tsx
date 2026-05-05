@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getMarketStatus } from "../../../src/lib/marketHours";
 import { createClient } from "../../../src/lib/supabase";
 import { getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
-import type { InvestmentDataStatus } from "../../../src/lib/canonicalFinancialData";
+import type { InvestmentDataStatus, CanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
 
 interface Position {
   financial_account_id: string | null;
@@ -323,6 +323,7 @@ export default function InvestmentsPage() {
   const [addMsg, setAddMsg] = useState<string | null>(null);
 
   const [investmentDataStatus, setInvestmentDataStatus] = useState<InvestmentDataStatus>("no_brokerage_connection");
+  const [canonicalData, setCanonicalData] = useState<CanonicalInvestments | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -339,6 +340,7 @@ export default function InvestmentsPage() {
       console.warn("[Investments]", canonical.dataStatus, canonical.warnings);
     }
     setInvestmentDataStatus(canonical.dataStatus);
+    setCanonicalData(canonical);
 
     // The canonical function returns positions already filtered to investment accounts only.
     // We need the full position fields for display, so re-fetch using the canonical account filter.
@@ -417,6 +419,9 @@ export default function InvestmentsPage() {
   const filtered = filterType === "all" ? nonCash : nonCash.filter((p) => p.asset_type === filterType);
 
   const totalValue = positions.reduce((s, p) => s + Number(p.last_valuation ?? 0), 0);
+  // When no positions are synced, use the canonical fallback balance so the page
+  // shows the same total as Home and Financial Summary instead of $0.
+  const displayTotalValue = positions.length > 0 ? totalValue : (canonicalData?.totalInvestmentValue ?? 0);
   const totalCost = nonCash.reduce((s, p) => s + Number(p.total_cost_basis ?? 0), 0);
   const totalGain = nonCash.reduce((s, p) => s + Number(p.unrealized_gain ?? 0), 0);
   const totalCashValue = cash.reduce((s, p) => s + Number(p.last_valuation ?? 0), 0);
@@ -459,10 +464,28 @@ export default function InvestmentsPage() {
       </div>
       <TickerBar />
 
+      {/* Fallback warning banner — only shown when positions are unavailable */}
+      {canonicalData && (investmentDataStatus === "fallback_used" || investmentDataStatus === "missing_positions") && (
+        <div style={{ marginBottom: "16px", padding: "12px 16px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: "12px", display: "flex", alignItems: "flex-start", gap: "10px" }}>
+          <span style={{ fontSize: "16px", flexShrink: 0 }}>⚠</span>
+          <div>
+            <div style={{ fontSize: "12px", fontWeight: 700, color: "#f59e0b", marginBottom: "2px" }}>
+              {investmentDataStatus === "fallback_used" ? "Positions Not Yet Synced" : "Investment Data Incomplete"}
+            </div>
+            <div style={{ fontSize: "11px", color: "#78716c" }}>
+              {canonicalData.warnings[0] ?? "Sync your brokerage to load real position data."}
+              {investmentDataStatus === "fallback_used" && (
+                <span style={{ marginLeft: "6px", color: "#92400e" }}>Total reflects account balance — not individual positions.</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* KPI Row */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "24px" }}>
         {[
-          { label: "Total Portfolio Value", value: fmtCompact(totalValue),    color: "#38bdf8", rgb: "56,189,248",   sub: `${positions.length} positions` },
+          { label: "Total Portfolio Value", value: fmtCompact(displayTotalValue), color: "#38bdf8", rgb: "56,189,248",   sub: positions.length > 0 ? `${positions.length} positions` : (investmentDataStatus === "fallback_used" ? "Balance fallback" : "No data") },
           { label: "Total Invested",         value: fmtCompact(totalCost),    color: "#a855f7", rgb: "168,85,247",   sub: "Cost basis" },
           { label: "Unrealized Gain/Loss",   value: fmtCompact(totalGain),    color: totalGain >= 0 ? "#22c55e" : "#ef4444", rgb: totalGain >= 0 ? "34,197,94" : "239,68,68", sub: fmtPct(gainPct) },
           { label: "Cash & Equivalents",     value: fmtCompact(totalCashValue), color: "#64748b", rgb: "100,116,139", sub: `${cash.length} accounts` },
