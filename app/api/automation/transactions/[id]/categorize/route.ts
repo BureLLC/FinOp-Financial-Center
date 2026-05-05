@@ -35,7 +35,10 @@ export async function POST(
 
   if (!txRow) return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
 
-  const accountUserId = (txRow.financial_accounts as { user_id: string } | null)?.user_id;
+  type AccountOwnerRow = { user_id: string | null };
+  const accountRelation = txRow.financial_accounts as AccountOwnerRow | AccountOwnerRow[] | null;
+  const accountOwner = Array.isArray(accountRelation) ? accountRelation[0] : accountRelation;
+  const accountUserId = accountOwner?.user_id ?? null;
   if (accountUserId !== userId) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
 
   const previousCategory = txRow.category as string | null;

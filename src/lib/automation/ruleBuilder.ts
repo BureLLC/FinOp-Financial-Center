@@ -2,7 +2,7 @@
 // Called only from the categorize API endpoint — not from the suggestion pipeline.
 
 import { SupabaseClient } from "@supabase/supabase-js";
-import { AutomationRule } from "./types";
+import { AutomationRule, MerchantNormalizedMatcher, DescriptionPatternMatcher } from "./types";
 import { SENSITIVE_CATEGORIES } from "./constants";
 import { normalizeMerchant, normalizeDescription } from "./merchantNormalizer";
 
@@ -67,13 +67,11 @@ export async function createOrStrengthenRule(
 
   // Find a rule whose matcher_config and action_config match meaningfully
   const match = (existing ?? []).find((r: AutomationRule) => {
-    const mc = r.matcher_config as Record<string, unknown>;
-    const ac = r.action_config as Record<string, unknown>;
-    if (ac.category !== normalizedCategory) return false;
+    if (r.action_config.category !== normalizedCategory) return false;
     if (matcherType === "merchant_normalized") {
-      return (mc as { normalized_merchant?: string }).normalized_merchant === normalizedMerchant;
+      return (r.matcher_config as MerchantNormalizedMatcher).normalized_merchant === normalizedMerchant;
     }
-    const existingTokens = (mc as { description_tokens?: string[] }).description_tokens ?? [];
+    const existingTokens = (r.matcher_config as DescriptionPatternMatcher).description_tokens ?? [];
     return existingTokens.join(",") === descTokens.join(",");
   });
 
