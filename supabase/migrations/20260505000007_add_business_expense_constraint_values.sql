@@ -32,15 +32,15 @@ DECLARE
 BEGIN
   SELECT conname INTO v_cname
   FROM pg_constraint
-  WHERE conrelid = 'automation_suggestions'::regclass
+  WHERE conrelid = 'public.automation_suggestions'::regclass
     AND contype = 'c'
     AND conname LIKE '%suggestion_type%';
 
   IF v_cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE automation_suggestions DROP CONSTRAINT %I', v_cname);
+    EXECUTE format('ALTER TABLE public.automation_suggestions DROP CONSTRAINT %I', v_cname);
   END IF;
 
-  ALTER TABLE automation_suggestions
+  ALTER TABLE public.automation_suggestions
     ADD CONSTRAINT automation_suggestions_suggestion_type_check
       CHECK (suggestion_type IN (
         'transaction_category',
@@ -53,12 +53,12 @@ END $$;
 --   DECLARE v_cname text;
 --   BEGIN
 --     SELECT conname INTO v_cname FROM pg_constraint
---     WHERE conrelid = 'automation_suggestions'::regclass AND contype = 'c'
+--     WHERE conrelid = 'public.automation_suggestions'::regclass AND contype = 'c'
 --       AND conname LIKE '%suggestion_type%';
 --     IF v_cname IS NOT NULL THEN
---       EXECUTE format('ALTER TABLE automation_suggestions DROP CONSTRAINT %I', v_cname);
+--       EXECUTE format('ALTER TABLE public.automation_suggestions DROP CONSTRAINT %I', v_cname);
 --     END IF;
---     ALTER TABLE automation_suggestions
+--     ALTER TABLE public.automation_suggestions
 --       ADD CONSTRAINT automation_suggestions_suggestion_type_check
 --         CHECK (suggestion_type = 'transaction_category');
 --   END $$;
@@ -71,15 +71,15 @@ DECLARE
 BEGIN
   SELECT conname INTO v_cname
   FROM pg_constraint
-  WHERE conrelid = 'automation_rules'::regclass
+  WHERE conrelid = 'public.automation_rules'::regclass
     AND contype = 'c'
     AND conname LIKE '%action_type%';
 
   IF v_cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE automation_rules DROP CONSTRAINT %I', v_cname);
+    EXECUTE format('ALTER TABLE public.automation_rules DROP CONSTRAINT %I', v_cname);
   END IF;
 
-  ALTER TABLE automation_rules
+  ALTER TABLE public.automation_rules
     ADD CONSTRAINT automation_rules_action_type_check
       CHECK (action_type IN (
         'set_category',
@@ -93,12 +93,12 @@ END $$;
 --   DECLARE v_cname text;
 --   BEGIN
 --     SELECT conname INTO v_cname FROM pg_constraint
---     WHERE conrelid = 'automation_rules'::regclass AND contype = 'c'
+--     WHERE conrelid = 'public.automation_rules'::regclass AND contype = 'c'
 --       AND conname LIKE '%action_type%';
 --     IF v_cname IS NOT NULL THEN
---       EXECUTE format('ALTER TABLE automation_rules DROP CONSTRAINT %I', v_cname);
+--       EXECUTE format('ALTER TABLE public.automation_rules DROP CONSTRAINT %I', v_cname);
 --     END IF;
---     ALTER TABLE automation_rules
+--     ALTER TABLE public.automation_rules
 --       ADD CONSTRAINT automation_rules_action_type_check
 --         CHECK (action_type IN ('set_category', 'set_subcategory'));
 --   END $$;
@@ -113,15 +113,15 @@ DECLARE
 BEGIN
   SELECT conname INTO v_cname
   FROM pg_constraint
-  WHERE conrelid = 'automation_audit_log'::regclass
+  WHERE conrelid = 'public.automation_audit_log'::regclass
     AND contype = 'c'
     AND conname LIKE '%action_taken%';
 
   IF v_cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE automation_audit_log DROP CONSTRAINT %I', v_cname);
+    EXECUTE format('ALTER TABLE public.automation_audit_log DROP CONSTRAINT %I', v_cname);
   END IF;
 
-  ALTER TABLE automation_audit_log
+  ALTER TABLE public.automation_audit_log
     ADD CONSTRAINT automation_audit_log_action_taken_check
       CHECK (action_taken IN (
         'set_category',
@@ -139,12 +139,12 @@ END $$;
 --   DECLARE v_cname text;
 --   BEGIN
 --     SELECT conname INTO v_cname FROM pg_constraint
---     WHERE conrelid = 'automation_audit_log'::regclass AND contype = 'c'
+--     WHERE conrelid = 'public.automation_audit_log'::regclass AND contype = 'c'
 --       AND conname LIKE '%action_taken%';
 --     IF v_cname IS NOT NULL THEN
---       EXECUTE format('ALTER TABLE automation_audit_log DROP CONSTRAINT %I', v_cname);
+--       EXECUTE format('ALTER TABLE public.automation_audit_log DROP CONSTRAINT %I', v_cname);
 --     END IF;
---     ALTER TABLE automation_audit_log
+--     ALTER TABLE public.automation_audit_log
 --       ADD CONSTRAINT automation_audit_log_action_taken_check
 --         CHECK (action_taken IN (
 --           'set_category', 'set_subcategory',
@@ -174,7 +174,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 DECLARE
-  v_suggestion     automation_suggestions%ROWTYPE;
+  v_suggestion     public.automation_suggestions%ROWTYPE;
   v_tx_id          uuid;
   v_tx_user_id     uuid;
   v_prev_candidate boolean;
@@ -182,7 +182,7 @@ DECLARE
 BEGIN
   -- 1. Fetch and lock suggestion; verify ownership
   SELECT * INTO v_suggestion
-  FROM automation_suggestions
+  FROM public.automation_suggestions
   WHERE id = p_suggestion_id
   FOR UPDATE;
 
@@ -208,8 +208,8 @@ BEGIN
   v_tx_id := v_suggestion.source_entity_id;
 
   SELECT fa.user_id INTO v_tx_user_id
-  FROM transactions t
-  JOIN financial_accounts fa ON fa.id = t.financial_account_id
+  FROM public.transactions t
+  JOIN public.financial_accounts fa ON fa.id = t.financial_account_id
   WHERE t.id = v_tx_id;
 
   IF NOT FOUND OR v_tx_user_id <> p_user_id THEN
@@ -218,16 +218,16 @@ BEGIN
 
   -- 5. Capture current is_business_candidate for audit previous_value
   SELECT is_business_candidate INTO v_prev_candidate
-  FROM transactions
+  FROM public.transactions
   WHERE id = v_tx_id;
 
   -- 6. Update transactions — is_business_candidate only
-  UPDATE transactions
+  UPDATE public.transactions
   SET is_business_candidate = true
   WHERE id = v_tx_id;
 
   -- 7. Mark suggestion accepted
-  UPDATE automation_suggestions
+  UPDATE public.automation_suggestions
   SET
     status      = 'accepted',
     resolved_at = now(),
@@ -235,7 +235,7 @@ BEGIN
   WHERE id = p_suggestion_id;
 
   -- 8. Insert audit log entry; capture generated ID for return
-  INSERT INTO automation_audit_log (
+  INSERT INTO public.automation_audit_log (
     user_id,
     automation_rule_id,
     suggestion_id,

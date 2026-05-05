@@ -129,8 +129,8 @@ test("migration 6: adds is_business_candidate BOOLEAN NULL", () => {
     path.join(ROOT, "supabase/migrations/20260505000006_add_is_business_candidate.sql"),
     "utf8",
   );
-  // Verify the actual ADD COLUMN statement (not comments)
-  const addColumnMatch = sql.match(/ADD\s+COLUMN\s+is_business_candidate[^;]+/i);
+  // Verify the actual ADD COLUMN statement (not comments); handle optional IF NOT EXISTS
+  const addColumnMatch = sql.match(/ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?is_business_candidate[^;]+/i);
   assert.ok(addColumnMatch, "ADD COLUMN is_business_candidate statement must exist");
   const addColumnStatement = addColumnMatch[0];
   assert.match(addColumnStatement, /BOOLEAN\s+NULL/i, "Must be BOOLEAN NULL");

@@ -17,7 +17,7 @@
 -- isDeductibleBusinessExpense() reads only tx.category — this field has no effect
 -- on Tax Center, Write-Off totals, or any financial calculation.
 --
--- Rollback: ALTER TABLE transactions DROP COLUMN is_business_candidate;
+-- Rollback: ALTER TABLE public.transactions DROP COLUMN is_business_candidate;
 
-ALTER TABLE transactions
-  ADD COLUMN is_business_candidate BOOLEAN NULL;
+ALTER TABLE public.transactions
+  ADD COLUMN IF NOT EXISTS is_business_candidate BOOLEAN NULL;
