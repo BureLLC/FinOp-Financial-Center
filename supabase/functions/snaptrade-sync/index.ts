@@ -82,41 +82,69 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, serviceRoleKey)
     const body = await req.json().catch(() => ({}))
-    const { authorizationId } = body
+    // authorizationId — present on first-time connect (from OAuth redirect)
+    // connectionId    — present on re-sync (from "Sync Now" button), identifies which connection to sync
+    const { authorizationId, connectionId: bodyConnectionId } = body
     const snapUserId = user.id
 
-    console.log(`[snaptrade-sync] Starting sync | user: ${snapUserId.slice(0, 8)}... | authorizationId: ${authorizationId ?? "(none — re-sync)"}`)
+    console.log(`[snaptrade-sync] Starting sync | user: ${snapUserId.slice(0, 8)}... | authorizationId: ${authorizationId ?? "(none)"} | connectionId: ${bodyConnectionId ?? "(none — will pick latest)"}`)
 
-    // Fetch stored connection — no status filter so reconnect / re-sync can reactivate
-    const { data: storedConn, error: connLookupErr } = await supabase
+    // Fetch stored connection — no status filter so reconnect / re-sync can reactivate.
+    // If a specific connectionId was provided (re-sync button), use it; otherwise pick latest.
+    let connQuery = supabase
       .from("integration_connections")
       .select("id, config, status, institution_name, external_id")
       .eq("user_id", user.id)
       .eq("provider", "snaptrade")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
+
+    if (bodyConnectionId) {
+      connQuery = connQuery.eq("id", bodyConnectionId)
+    } else {
+      connQuery = connQuery.order("created_at", { ascending: false }).limit(1)
+    }
+
+    const { data: storedConn, error: connLookupErr } = await connQuery.maybeSingle()
 
     if (connLookupErr) {
       console.error("[snaptrade-sync] Connection lookup error:", connLookupErr.message)
     }
+    if (!storedConn && bodyConnectionId) {
+      console.error(`[snaptrade-sync] No connection found for connectionId: ${bodyConnectionId} and user: ${snapUserId.slice(0, 8)}...`)
+    }
 
     console.log(`[snaptrade-sync] Stored connection: ${storedConn?.id ?? "none"} | status: ${storedConn?.status ?? "n/a"} | institution: ${storedConn?.institution_name ?? "n/a"}`)
 
-    const userSecret = (storedConn?.config as Record<string, unknown>)?.userSecret as string
+    const config = storedConn?.config as Record<string, unknown> | null ?? null
+    const userSecret = config?.userSecret as string | undefined
+    const storedSnapUserId = config?.snapTradeUserId as string | undefined
+
     if (!userSecret) return json({ error: "No userSecret found in DB — complete SnapTrade OAuth first" }, 400)
+
+    // Warn if the userId used during registration differs from the current auth user ID.
+    // A mismatch means the SnapTrade API will look up accounts for a different userId than was registered.
+    if (storedSnapUserId && storedSnapUserId !== snapUserId) {
+      console.warn(`[snaptrade-sync] userId mismatch! config.snapTradeUserId=${storedSnapUserId.slice(0, 8)}... vs current user.id=${snapUserId.slice(0, 8)}... — using stored snapTradeUserId for API call to match registration`)
+    } else {
+      console.log(`[snaptrade-sync] userId consistent | snapTradeUserId: ${(storedSnapUserId ?? snapUserId).slice(0, 8)}...`)
+    }
+
+    // Use the userId that was registered with SnapTrade (stored in config), not necessarily the current JWT sub.
+    // If storedSnapUserId is missing, fall back to user.id — they should be identical unless something went wrong.
+    const snapTradeUserId = storedSnapUserId ?? snapUserId
 
     // Preserve the existing institution name and external_id; only overwrite when the API provides better data
     const prevInstitutionName = storedConn?.institution_name as string | null ?? null
     const prevExternalId = storedConn?.external_id as string | null ?? null
 
     // Fetch all accounts for this SnapTrade user
+    console.log(`[snaptrade-sync] Fetching accounts | endpoint: /api/v1/accounts | snapTradeUserId: ${snapTradeUserId.slice(0, 8)}...`)
     const acctResult = await snapTradeGet(clientId, consumerKey, "/api/v1/accounts", {
-      userId: snapUserId, userSecret,
+      userId: snapTradeUserId, userSecret,
     })
 
     if (!acctResult.ok) {
-      console.error("[snaptrade-sync] Account fetch failed | HTTP:", acctResult.status, "| body:", JSON.stringify(acctResult.data))
+      const errBody = JSON.stringify(acctResult.data)
+      console.error(`[snaptrade-sync] Account fetch failed | HTTP: ${acctResult.status} | body: ${errBody.substring(0, 500)}`)
       const connId = storedConn?.id
       if (connId) {
         await supabase.from("integration_connections").update({
@@ -132,8 +160,29 @@ serve(async (req) => {
       return json({ error: "Failed to fetch accounts from SnapTrade", httpStatus: acctResult.status }, 500)
     }
 
-    const rawAccounts = Array.isArray(acctResult.data) ? acctResult.data : []
-    console.log(`[snaptrade-sync] SnapTrade returned ${rawAccounts.length} account(s)`)
+    // Diagnose response shape before filtering — critical for finding parsing failures
+    const responseIsArray = Array.isArray(acctResult.data)
+    if (!responseIsArray) {
+      const dataType = acctResult.data === null ? "null" : typeof acctResult.data
+      const dataShape = acctResult.data && typeof acctResult.data === "object"
+        ? Object.keys(acctResult.data as Record<string, unknown>).join(", ")
+        : String(acctResult.data).substring(0, 300)
+      console.error(`[snaptrade-sync] UNEXPECTED: account response is NOT an array | type: ${dataType} | keys/value: ${dataShape}`)
+      console.error(`[snaptrade-sync] This means SnapTrade returned a non-array response with HTTP 200 — treating as zero accounts`)
+    }
+
+    const rawAccounts = responseIsArray ? (acctResult.data as unknown[]) : []
+    console.log(`[snaptrade-sync] SnapTrade returned ${rawAccounts.length} account(s) | response_was_array: ${responseIsArray}`)
+
+    // Log first account shape so we can verify the parser matches the real API shape
+    if (rawAccounts.length > 0) {
+      const first = rawAccounts[0] as Record<string, unknown>
+      const keys = Object.keys(first).join(", ")
+      const bal = first?.balance as Record<string, unknown> | undefined
+      const balTotal = bal?.total as Record<string, unknown> | undefined
+      console.log(`[snaptrade-sync] First account keys: [${keys}]`)
+      console.log(`[snaptrade-sync] First account field check: id=${first?.id !== undefined} | name=${first?.name !== undefined} | balance.total.amount=${balTotal?.amount !== undefined} | institution_name=${first?.institution_name !== undefined} | raw_type=${first?.raw_type !== undefined} | status=${first?.status !== undefined} | number=${first?.number !== undefined}`)
+    }
 
     // Log each account at a safe, non-sensitive level
     for (const acct of rawAccounts) {
@@ -299,28 +348,29 @@ serve(async (req) => {
           deleted_at: null, // reactivate if previously soft-deleted
         }).eq("id", existingAcct.id)
         if (updateErr) {
-          console.error(`[snaptrade-sync] Account update failed | id: ${acctId} | error:`, updateErr.message)
+          console.error(`[snaptrade-sync] Account update failed | snapId: ${acctId} | db_id: ${existingAcct.id} | code: ${updateErr.code} | error: ${updateErr.message}`)
           dbAction = "error"
           dbError = updateErr.message
           accountDbErrors++
         } else {
           dbAction = "updated"
           totalAccountsSynced++
-          console.log(`[snaptrade-sync] Account updated | id: ${acctId} | db_id: ${existingAcct.id}`)
+          console.log(`[snaptrade-sync] Account updated | snapId: ${acctId} | db_id: ${existingAcct.id}`)
         }
       } else {
+        console.log(`[snaptrade-sync] Inserting new account | snapId: ${acctId} | name: ${acctName} | fields: user_id=${!!user.id} integration_connection_id=${!!connectionId} provider_account_id=${!!acctId} account_currency=${acctRecord.account_currency} account_type=investment`)
         const { error: insertErr } = await supabase.from("financial_accounts").insert({
           ...acctRecord,
           created_at: new Date().toISOString(),
         })
         if (insertErr) {
-          console.error(`[snaptrade-sync] Account insert failed | id: ${acctId} | error:`, insertErr.message)
+          console.error(`[snaptrade-sync] Account insert failed | snapId: ${acctId} | code: ${insertErr.code} | error: ${insertErr.message} | hint: ${insertErr.hint ?? "none"} | details: ${insertErr.details ?? "none"}`)
           dbAction = "error"
           dbError = insertErr.message
           accountDbErrors++
         } else {
           totalAccountsSynced++
-          console.log(`[snaptrade-sync] Account inserted | id: ${acctId}`)
+          console.log(`[snaptrade-sync] Account inserted OK | snapId: ${acctId}`)
         }
       }
 
@@ -346,7 +396,7 @@ serve(async (req) => {
 
       // ── Positions for this account ────────────────────────────────────────
       const posResult = await snapTradeGetPositions(clientId, consumerKey, acctId, {
-        userId: snapUserId, userSecret,
+        userId: snapTradeUserId, userSecret,
       })
 
       if (!posResult.ok) {

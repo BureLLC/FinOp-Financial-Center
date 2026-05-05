@@ -297,11 +297,32 @@ export default function ConnectionsPage() {
       });
 
       if (response.ok) {
+        const data = await response.json().catch(() => ({}));
         const delay = provider === "snaptrade" ? 3000 : 6000;
-        setSyncMessage("Sync started. Refreshing in a moment...");
+
+        if (provider === "snaptrade") {
+          const syncStatus = data?.syncStatus as string | undefined;
+          const accountsReturned = data?.accountsReturned as number | undefined;
+          const accountsSynced = data?.accountsSynced as number | undefined;
+          const dbErrors = data?.accountsDbErrors as number | undefined;
+
+          if (syncStatus === "connected_no_accounts_returned" || accountsReturned === 0) {
+            setSyncMessage("⚠ SnapTrade returned 0 accounts. Check brokerage connection in portal.");
+          } else if (dbErrors && dbErrors > 0 && accountsSynced === 0) {
+            setSyncMessage(`Sync failed: ${dbErrors} account(s) could not be saved. Check Supabase logs.`);
+          } else if (accountsSynced !== undefined && accountsSynced > 0) {
+            setSyncMessage(`Synced ${accountsSynced} account(s). Refreshing...`);
+          } else {
+            setSyncMessage("Sync started. Refreshing in a moment...");
+          }
+        } else {
+          setSyncMessage("Sync started. Refreshing in a moment...");
+        }
+
         setTimeout(() => { loadData(); setSyncMessage(null); }, delay);
       } else {
-        setSyncMessage("Sync failed. Please try again.");
+        const errData = await response.json().catch(() => ({}));
+        setSyncMessage(errData?.error ?? "Sync failed. Please try again.");
       }
     } catch {
       setSyncMessage("Sync failed. Please try again.");
