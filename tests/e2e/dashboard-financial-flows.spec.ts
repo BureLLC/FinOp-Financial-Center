@@ -222,6 +222,18 @@ test.describe("Automation: financial page invariants", () => {
     // Verify the API routes are reachable and return auth errors rather than crashes
     const suggestionsRes = await request.get("/api/automation/suggestions");
     expect([401, 403, 307, 308]).toContain(suggestionsRes.status());
+
+    const rulesRes = await request.get("/api/automation/rules");
+    expect([401, 403, 307, 308]).toContain(rulesRes.status());
+  });
+
+  test("automation rules page loads without crashing", async ({ page }) => {
+    await page.goto("/dashboard/automation", { waitUntil: "domcontentloaded" });
+
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText).toMatch(/automation rules/i);
+    expect(bodyText).not.toMatch(/NaN|undefined/i);
+    expect(bodyText).not.toMatch(/Application error|Unhandled Runtime Error|TypeError/i);
   });
 
   test("summary page financial KPIs are unaffected by automation", async ({ page }) => {

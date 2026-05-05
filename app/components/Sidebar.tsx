@@ -22,6 +22,7 @@ const NAV = [
   { group: "ACTIVITY", items: [
     { icon: "≡",  label: "Transactions", path: "/dashboard/transactions" },
     { icon: "⇄",  label: "Connections",  path: "/dashboard/connections" },
+    { icon: "◈",  label: "Automation",   path: "/dashboard/automation" },
     { icon: "🔔", label: "Alerts",       path: "/dashboard/alerts" },
   ]},
   { group: "AI & TOOLS", items: [
