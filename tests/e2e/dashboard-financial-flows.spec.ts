@@ -225,6 +225,9 @@ test.describe("Automation: financial page invariants", () => {
 
     const rulesRes = await request.get("/api/automation/rules");
     expect([401, 403, 307, 308]).toContain(rulesRes.status());
+
+    const activityRes = await request.get("/api/automation/activity");
+    expect([401, 403, 307, 308]).toContain(activityRes.status());
   });
 
   test("automation rules page loads without crashing", async ({ page }) => {
