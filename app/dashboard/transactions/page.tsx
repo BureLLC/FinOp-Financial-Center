@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
 import { activePostedTransactions, deduplicateTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 import { getCanonicalDeduplicatedTransactions } from "../../../src/lib/canonicalFinancialData";
+import type { AutomationSuggestion } from "../../../src/lib/automation/types";
+import { SENSITIVE_CATEGORIES } from "../../../src/lib/automation/constants";
 
 interface Transaction {
   id: string;
@@ -147,13 +149,17 @@ export default function TransactionsPage() {
   const [editType, setEditType] = useState("");
   const [editCategory, setEditCategory] = useState("");
   const [panelMsg, setPanelMsg] = useState<string | null>(null);
+  // Automation suggestions keyed by transaction id
+  const [suggestions, setSuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
+  // Which suggestion panel is open (by transaction id)
+  const [openSuggestion, setOpenSuggestion] = useState<string | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    
+
     const [dedupTransactions, acctRes] = await Promise.all([
       // Use canonical deduplicated source
       getCanonicalDeduplicatedTransactions(supabase, user.id),
@@ -164,10 +170,26 @@ export default function TransactionsPage() {
         .eq("is_active", true)
         .is("deleted_at", null),
     ]);
-    
+
     setTransactions(dedupTransactions as Transaction[]);
     setAccounts(acctRes.data ?? []);
     setLoading(false);
+    loadSuggestions();
+  };
+
+  const loadSuggestions = async () => {
+    try {
+      const res = await fetch("/api/automation/suggestions");
+      if (!res.ok) return;
+      const { suggestions: data } = await res.json();
+      const map = new Map<string, AutomationSuggestion>();
+      for (const s of (data ?? [])) {
+        map.set(s.source_entity_id, s);
+      }
+      setSuggestions(map);
+    } catch {
+      // Suggestions are non-critical; silent fail is acceptable
+    }
   };
 
   const getAccount = (id: string) => accounts.find((a) => a.id === id);
@@ -202,16 +224,14 @@ export default function TransactionsPage() {
     setSaving(true);
     setPanelMsg(null);
 
-    const updatedFields = {
+    // income_subtype and transaction_type via direct write (existing behavior)
+    const metaFields = {
       income_subtype: editSubtype || null,
       transaction_type: editType,
-      category: editCategory || null,
     };
-    const updates = { ...updatedFields, updated_at: new Date().toISOString() };
-
     const { error } = await supabase
       .from("transactions")
-      .update(updates)
+      .update({ ...metaFields, updated_at: new Date().toISOString() })
       .eq("id", selected.id);
 
     if (error) {
@@ -220,64 +240,63 @@ export default function TransactionsPage() {
       return;
     }
 
-    // Update primary transaction in local state
-    setTransactions((prev) =>
-      prev.map((t) => (t.id === selected.id ? { ...t, ...updatedFields } : t))
-    );
-    setSelected((prev) => (prev ? { ...prev, ...updatedFields } : null));
+    // Category via the categorize endpoint (creates audit log, rule, and suggestions)
+    const categoryChanged = editCategory !== (selected.category ?? "");
+    let categoryError = false;
+    let suggestionsCreated = 0;
 
-    // Auto-tag all other transactions with the same merchant name (or description fallback)
-    // Only update transactions that haven't been manually categorized differently
-    let autoTagCount = 0;
+    if (categoryChanged) {
+      const isSensitive = SENSITIVE_CATEGORIES.has(editCategory.toLowerCase().trim());
+      if (isSensitive) {
+        // Sensitive categories written directly without automation (no rule/suggestion)
+        await supabase
+          .from("transactions")
+          .update({ category: editCategory || null })
+          .eq("id", selected.id);
+      } else {
+        const catRes = await fetch(`/api/automation/transactions/${selected.id}/categorize`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category: editCategory || null }),
+        });
+        if (catRes.ok) {
+          const catData = await catRes.json().catch(() => ({}));
+          suggestionsCreated = catData.suggestionsCreated ?? 0;
+          if (suggestionsCreated > 0) await loadSuggestions();
+        } else {
+          categoryError = true;
+          // Fall back to direct write so the category still saves
+          await supabase
+            .from("transactions")
+            .update({ category: editCategory || null })
+            .eq("id", selected.id);
+        }
+      }
+    }
+
+    // Update local state
+    const allUpdated = { ...metaFields, category: editCategory || null };
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === selected.id ? { ...t, ...allUpdated } : t))
+    );
+    setSelected((prev) => (prev ? { ...prev, ...allUpdated } : null));
+
+    // Auto-tag income_subtype for transactions from the same merchant (existing behavior, category excluded)
     const matchKey = selected.merchant_name?.trim().toLowerCase();
     const descKey = selected.description?.trim().toLowerCase();
+    let autoTagCount = 0;
 
-    if (matchKey || descKey) {
-      // Build filter for transactions that can be auto-tagged
-      const autoTagFilters: any = {
-        neq: { id: selected.id },
-        is: { deleted_at: null },
-      };
+    if ((matchKey || descKey) && metaFields.income_subtype != null) {
+      let query = supabase
+        .from("transactions")
+        .update({ income_subtype: metaFields.income_subtype })
+        .neq("id", selected.id)
+        .is("deleted_at", null)
+        .is("income_subtype", null);
 
-      // Only auto-tag fields that are being set and where the transaction doesn't already have them set
-      const autoTagUpdates: any = {};
-      if (updatedFields.category != null) {
-        autoTagFilters.is = { ...autoTagFilters.is, category: null };
-        autoTagUpdates.category = updatedFields.category;
-      }
-      if (updatedFields.income_subtype != null) {
-        autoTagFilters.is = { ...autoTagFilters.is, income_subtype: null };
-        autoTagUpdates.income_subtype = updatedFields.income_subtype;
-      }
-      if (updatedFields.transaction_type != null) {
-        autoTagUpdates.transaction_type = updatedFields.transaction_type;
-        // For transaction_type, we might want to always update if it's bank, but let's be conservative
-      }
-
-      if (Object.keys(autoTagUpdates).length > 0) {
-        let query = supabase.from("transactions").update(autoTagUpdates);
-
-        for (const [key, value] of Object.entries(autoTagFilters)) {
-          if (key === 'neq') {
-            for (const [col, val] of Object.entries(value as any)) {
-              query = query.neq(col, val);
-            }
-          } else if (key === 'is') {
-            for (const [col, val] of Object.entries(value as any)) {
-              query = query.is(col, val);
-            }
-          }
-        }
-
-        if (matchKey) {
-          query = query.ilike("merchant_name", matchKey);
-        } else if (descKey) {
-          query = query.ilike("description", descKey);
-        }
-
-         const { data } = await query.select("id");
-        autoTagCount = (data ?? []).length;
-      }
+      query = matchKey ? query.ilike("merchant_name", matchKey) : query.ilike("description", descKey as string);
+      const { data } = await query.select("id");
+      autoTagCount = (data ?? []).length;
     }
 
     if (autoTagCount > 0) {
@@ -287,16 +306,18 @@ export default function TransactionsPage() {
           const name = t.merchant_name?.trim().toLowerCase();
           const desc = t.description?.trim().toLowerCase();
           const matches = matchKey ? name === matchKey : desc === descKey;
-          return matches ? { ...t, ...updatedFields } : t;
+          return matches ? { ...t, income_subtype: metaFields.income_subtype } : t;
         })
       );
     }
 
-    setPanelMsg(
-      autoTagCount > 0
-        ? `Saved. Also auto-tagged ${autoTagCount} matching transaction${autoTagCount === 1 ? "" : "s"}.`
-        : "Saved successfully."
-    );
+    const msg = categoryError
+      ? "Saved, but category automation failed — category saved directly."
+      : suggestionsCreated > 0
+      ? `Saved. Found ${suggestionsCreated} similar transaction${suggestionsCreated === 1 ? "" : "s"} to categorize.`
+      : "Saved successfully.";
+
+    setPanelMsg(msg);
     setSaving(false);
   };
 
@@ -319,6 +340,37 @@ export default function TransactionsPage() {
       setDeleting(false);
     }
   };
+
+  const acceptSuggestion = async (suggestionId: string, txId: string, category: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/accept`, { method: "POST" });
+    if (!res.ok) return;
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === txId ? { ...t, category } : t))
+    );
+    setSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenSuggestion(null);
+  };
+
+  const rejectSuggestion = async (suggestionId: string, txId: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/reject`, { method: "POST" });
+    if (!res.ok) return;
+    setSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenSuggestion(null);
+  };
+
+  function confidenceTier(confidence: number): string {
+    if (confidence >= 0.80) return "High";
+    if (confidence >= 0.60) return "Medium";
+    return "Low";
+  }
 
   const txTypes = [...new Set(transactions.map((t) => t.transaction_type))];
 
@@ -411,66 +463,142 @@ export default function TransactionsPage() {
               const account = getAccount(tx.financial_account_id);
               const isSelected = selected?.id === tx.id;
               const isCredit = tx.direction === "credit";
+              const suggestion = suggestions.get(tx.id);
+              const suggestionOpen = openSuggestion === tx.id;
               return (
-                <div key={tx.id} onClick={() => openPanel(tx)}
-                  style={{
-                    display: "flex", alignItems: "center", gap: "14px",
-                    padding: "13px 16px",
-                    background: isSelected ? "rgba(37,99,235,0.08)" : "rgba(255,255,255,0.02)",
-                    border: `1px solid ${isSelected ? "rgba(37,99,235,0.25)" : "rgba(255,255,255,0.04)"}`,
-                    borderRadius: "10px", cursor: "pointer", transition: "all 0.15s ease",
-                  }}
-                  onMouseEnter={(e) => { if (!isSelected) { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"; } }}
-                  onMouseLeave={(e) => { if (!isSelected) { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.04)"; } }}
-                >
-                  <div style={{
-                    width: "42px", height: "42px", borderRadius: "12px", flexShrink: 0,
-                    background: `linear-gradient(145deg, ${color}22, ${color}44)`,
-                    border: `1px solid ${color}44`,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: "20px",
-                    boxShadow: `0 4px 12px ${color}22, inset 0 1px 0 ${color}33`,
-                  }}>{icon}</div>
+                <div key={tx.id} style={{ display: "flex", flexDirection: "column", gap: "0" }}>
+                  <div onClick={() => openPanel(tx)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "14px",
+                      padding: "13px 16px",
+                      background: isSelected ? "rgba(37,99,235,0.08)" : "rgba(255,255,255,0.02)",
+                      border: `1px solid ${isSelected ? "rgba(37,99,235,0.25)" : "rgba(255,255,255,0.04)"}`,
+                      borderRadius: suggestion && suggestionOpen ? "10px 10px 0 0" : "10px",
+                      cursor: "pointer", transition: "all 0.15s ease",
+                    }}
+                    onMouseEnter={(e) => { if (!isSelected) { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"; } }}
+                    onMouseLeave={(e) => { if (!isSelected) { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.04)"; } }}
+                  >
+                    <div style={{
+                      width: "42px", height: "42px", borderRadius: "12px", flexShrink: 0,
+                      background: `linear-gradient(145deg, ${color}22, ${color}44)`,
+                      border: `1px solid ${color}44`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: "20px",
+                      boxShadow: `0 4px 12px ${color}22, inset 0 1px 0 ${color}33`,
+                    }}>{icon}</div>
 
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: "13.5px", fontWeight: 600, color: "#e2e8f0", marginBottom: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {tx.merchant_name ?? tx.description ?? "Unknown"}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: "13.5px", fontWeight: 600, color: "#e2e8f0", marginBottom: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {tx.merchant_name ?? tx.description ?? "Unknown"}
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "11px", color: "#334155" }}>
+                          {new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        </span>
+                        {account && (
+                          <span style={{ fontSize: "11px", color: "#1e293b" }}>
+                            {account.institution_name ?? account.account_name}{account.mask ? ` ••${account.mask}` : ""}
+                          </span>
+                        )}
+                        {tx.category && (
+                          <span style={{ fontSize: "10px", color: "#475569", background: "rgba(255,255,255,0.05)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(255,255,255,0.07)" }}>
+                            {tx.category}
+                          </span>
+                        )}
+                        {tx.income_subtype && (
+                          <span style={{ fontSize: "10px", fontWeight: 600, color: "#22c55e", background: "rgba(34,197,94,0.1)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(34,197,94,0.2)" }}>
+                            {tx.income_subtype}
+                          </span>
+                        )}
+                        {tx.status === "pending" && (
+                          <span style={{ fontSize: "10px", fontWeight: 600, color: "#f59e0b", background: "rgba(245,158,11,0.1)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(245,158,11,0.2)" }}>
+                            pending
+                          </span>
+                        )}
+                        {suggestion && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenSuggestion(suggestionOpen ? null : tx.id); }}
+                            style={{
+                              fontSize: "10px", fontWeight: 600, color: "#818cf8",
+                              background: "rgba(99,102,241,0.12)",
+                              padding: "1px 8px", borderRadius: "99px",
+                              border: "1px solid rgba(99,102,241,0.3)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Suggestion
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                      <span style={{ fontSize: "11px", color: "#334155" }}>
-                        {new Date(tx.transaction_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                      </span>
-                      {account && (
-                        <span style={{ fontSize: "11px", color: "#1e293b" }}>
-                          {account.institution_name ?? account.account_name}{account.mask ? ` ••${account.mask}` : ""}
-                        </span>
-                      )}
-                      {tx.category && (
-                        <span style={{ fontSize: "10px", color: "#475569", background: "rgba(255,255,255,0.05)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(255,255,255,0.07)" }}>
-                          {tx.category}
-                        </span>
-                      )}
-                      {tx.income_subtype && (
-                        <span style={{ fontSize: "10px", fontWeight: 600, color: "#22c55e", background: "rgba(34,197,94,0.1)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(34,197,94,0.2)" }}>
-                          {tx.income_subtype}
-                        </span>
-                      )}
-                      {tx.status === "pending" && (
-                        <span style={{ fontSize: "10px", fontWeight: 600, color: "#f59e0b", background: "rgba(245,158,11,0.1)", padding: "1px 7px", borderRadius: "99px", border: "1px solid rgba(245,158,11,0.2)" }}>
-                          pending
-                        </span>
-                      )}
+
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontSize: "15px", fontWeight: 700, color: isCredit ? "#22c55e" : "#f8fafc" }}>
+                        {isCredit ? "+" : "−"}{fmt(Number(tx.amount))}
+                      </div>
+                      <div style={{ fontSize: "10px", color: isCredit ? "#22c55e" : "#ef4444", fontWeight: 500 }}>
+                        {isCredit ? "Money In" : "Money Out"}
+                      </div>
                     </div>
                   </div>
 
-                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                    <div style={{ fontSize: "15px", fontWeight: 700, color: isCredit ? "#22c55e" : "#f8fafc" }}>
-                      {isCredit ? "+" : "−"}{fmt(Number(tx.amount))}
+                  {/* Suggestion inline panel */}
+                  {suggestion && suggestionOpen && (
+                    <div style={{
+                      padding: "12px 16px",
+                      background: "rgba(99,102,241,0.06)",
+                      border: "1px solid rgba(99,102,241,0.2)",
+                      borderTop: "none",
+                      borderRadius: "0 0 10px 10px",
+                    }}>
+                      <div style={{ fontSize: "11px", color: "#818cf8", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
+                        SUGGESTED CATEGORY
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "13px", fontWeight: 600, color: "#e2e8f0" }}>
+                          {suggestion.suggested_action.category}
+                        </span>
+                        <span style={{
+                          fontSize: "10px", color: "#64748b",
+                          background: "rgba(255,255,255,0.04)",
+                          padding: "1px 7px", borderRadius: "99px",
+                          border: "1px solid rgba(255,255,255,0.07)",
+                        }}>
+                          {confidenceTier(suggestion.confidence)} confidence
+                        </span>
+                      </div>
+                      {suggestion.reason && (
+                        <div style={{ fontSize: "11px", color: "#475569", marginTop: "4px" }}>
+                          {suggestion.reason}
+                        </div>
+                      )}
+                      <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); acceptSuggestion(suggestion.id, tx.id, suggestion.suggested_action.category); }}
+                          style={{
+                            padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                            background: "rgba(99,102,241,0.2)",
+                            border: "1px solid rgba(99,102,241,0.4)",
+                            borderRadius: "7px", color: "#818cf8", cursor: "pointer",
+                          }}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); rejectSuggestion(suggestion.id, tx.id); }}
+                          style={{
+                            padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                            background: "transparent",
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            borderRadius: "7px", color: "#475569", cursor: "pointer",
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </div>
                     </div>
-                    <div style={{ fontSize: "10px", color: isCredit ? "#22c55e" : "#ef4444", fontWeight: 500 }}>
-                      {isCredit ? "Money In" : "Money Out"}
-                    </div>
-                  </div>
+                  )}
                 </div>
               );
             })}
