@@ -23,6 +23,8 @@ export const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set([
 // Used in tests to enumerate protected fields and in API layer documentation.
 // The Postgres apply function enforces this structurally by only issuing
 // UPDATE ... SET category = ..., subcategory = ...
+// Phase 4 note: is_business_candidate is intentionally NOT in this list —
+// it is the one additional field that Phase 4 automation is permitted to write.
 export const NON_AUTOMATABLE_TX_FIELDS: readonly string[] = [
   "income_subtype",
   "direction",
@@ -35,3 +37,28 @@ export const NON_AUTOMATABLE_TX_FIELDS: readonly string[] = [
   "provider",
   "deleted_at",
 ];
+
+// MIXED_USE_CATEGORIES: expenses that are sometimes personal, sometimes business.
+// Business expense suggestions targeting these require explicit user confirmation.
+// When BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is true, confidence for suggestions
+// that match a mixed-use merchant is capped at 0.60.
+// This set is independent of SENSITIVE_CATEGORIES and DEDUCTIBLE_CATEGORIES —
+// it governs business expense suggestion behavior only, not category automation.
+// It is NOT monitored by drift.test.mjs.
+export const MIXED_USE_CATEGORIES: ReadonlySet<string> = new Set([
+  "meals",
+  "home office",
+  "vehicle",
+  "phone",
+  "travel",
+  "equipment",
+  "education",
+  "professional services",
+]);
+
+// Controls whether business expense suggestion generation is active.
+// Phase 4 PR A: defaults to false — mark-business writes is_business_candidate
+// and creates an audit log entry, but does not create automation rules or
+// generate suggestions for similar transactions.
+// Set to true only when the Phase 4 PR B UI is merged and tested.
+export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false;
