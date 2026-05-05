@@ -2386,3 +2386,179 @@ test("sync-response: fallback remains when accounts synced but positions missing
   assert.equal(displayTotalValue, 124000); // fallback still active after sync
   assert.equal(canonicalInvestments.dataStatus, "fallback_used");
 });
+
+// ─── getSnapTradeSymbolMeta normalization tests ───────────────────────────────
+// Mirrors the helper added to supabase/functions/snaptrade-sync/index.ts.
+// Verifies all three SnapTrade symbol shapes return a normalized string ticker.
+
+function getSnapTradeSymbolMeta(position) {
+  const raw = position?.symbol;
+  const symbolOriginalType = raw === null ? "null" : typeof raw;
+
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    return { symbolStr: t || null, symbolOriginalType, description: t || null, typeCode: "equity", currencyCode: null };
+  }
+  if (!raw || typeof raw !== "object") {
+    return { symbolStr: null, symbolOriginalType, description: null, typeCode: "equity", currencyCode: null };
+  }
+  const outer = raw;
+
+  let secObj;
+  if (outer.symbol !== null && outer.symbol !== undefined && typeof outer.symbol === "object") {
+    secObj = outer.symbol;
+  } else {
+    secObj = outer;
+  }
+
+  const symbolStr =
+    typeof secObj.symbol === "string" ? secObj.symbol.trim() || null
+    : typeof secObj.raw_symbol === "string" ? secObj.raw_symbol.trim() || null
+    : null;
+
+  const description = typeof secObj.description === "string" ? secObj.description : null;
+
+  const typeObj = secObj.type;
+  const rawTypeCode = (typeof typeObj?.code === "string" ? typeObj.code : "equity").toLowerCase();
+  const typeCode = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode;
+
+  const symCurr = secObj.currency;
+  const posCurr = position?.currency;
+  let currencyCode = null;
+  if (symCurr && typeof symCurr === "object") {
+    currencyCode = typeof symCurr.code === "string" ? symCurr.code : null;
+  } else if (typeof symCurr === "string") {
+    currencyCode = symCurr;
+  }
+  if (!currencyCode && posCurr && typeof posCurr === "object") {
+    currencyCode = typeof posCurr.code === "string" ? posCurr.code : null;
+  } else if (!currencyCode && typeof posCurr === "string") {
+    currencyCode = posCurr;
+  }
+
+  return { symbolStr, symbolOriginalType, description, typeCode, currencyCode };
+}
+
+test("symbol-meta: flat UniversalSymbol — outer.symbol is a string ticker", () => {
+  // SnapTrade flat shape: { id, symbol: "SPAXX", description, currency, type }
+  const pos = {
+    symbol: { id: "abc", symbol: "SPAXX", description: "Fidelity Money Market", currency: { code: "USD" }, type: { code: "mutual_fund" } },
+    units: 1000, price: 1.0,
+  };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, "SPAXX");
+  assert.equal(meta.symbolOriginalType, "object");
+  assert.equal(meta.description, "Fidelity Money Market");
+  assert.equal(meta.typeCode, "etf"); // mutual_fund → etf
+  assert.equal(meta.currencyCode, "USD");
+});
+
+test("symbol-meta: nested BrokerageSymbol — outer.symbol is an inner UniversalSymbol object", () => {
+  // SnapTrade nested shape: { symbol: { id, symbol: "AAPL", ... }, exchange: { ... } }
+  const pos = {
+    symbol: {
+      symbol: { id: "xyz", symbol: "AAPL", description: "Apple Inc.", currency: { code: "USD" }, type: { code: "equity" } },
+      exchange: { id: "nasdaq", code: "NASDAQ" },
+    },
+    units: 10, price: 190.5,
+  };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, "AAPL");
+  assert.equal(meta.symbolOriginalType, "object");
+  assert.equal(meta.description, "Apple Inc.");
+  assert.equal(meta.typeCode, "equity");
+  assert.equal(meta.currencyCode, "USD");
+});
+
+test("symbol-meta: nested BrokerageSymbol — symbolStr is never [object Object]", () => {
+  const nestedSymbolObj = { id: "xyz", symbol: "TSLA", description: "Tesla Inc.", currency: { code: "USD" }, type: { code: "equity" } };
+  const pos = { symbol: { symbol: nestedSymbolObj, exchange: {} }, units: 5, price: 200 };
+  const meta = getSnapTradeSymbolMeta(pos);
+  // nestedSymbolObj.symbol is an object — raw_symbol fallback used
+  assert.notEqual(meta.symbolStr, "[object Object]");
+});
+
+test("symbol-meta: plain string position.symbol returns string as ticker", () => {
+  const pos = { symbol: "MSFT", units: 3, price: 400 };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, "MSFT");
+  assert.equal(meta.symbolOriginalType, "string");
+  assert.equal(meta.typeCode, "equity");
+});
+
+test("symbol-meta: null position.symbol returns null symbolStr", () => {
+  const pos = { symbol: null, units: 1, price: 10 };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, null);
+  assert.equal(meta.symbolOriginalType, "null");
+});
+
+test("symbol-meta: undefined position.symbol returns null symbolStr", () => {
+  const pos = { units: 1, price: 10 }; // no symbol field
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, null);
+  assert.equal(meta.symbolOriginalType, "undefined");
+});
+
+test("symbol-meta: empty string in flat symbol returns null symbolStr", () => {
+  const pos = { symbol: { symbol: "  ", description: "No ticker", type: { code: "equity" } }, units: 0, price: 0 };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, null);
+});
+
+test("symbol-meta: raw_symbol fallback when flat .symbol field is missing", () => {
+  const pos = { symbol: { raw_symbol: "GOOGL", description: "Alphabet", type: { code: "equity" } }, units: 2, price: 150 };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, "GOOGL");
+});
+
+test("symbol-meta: mutual_fund typeCode normalized to etf for both flat and nested", () => {
+  const flat = { symbol: { symbol: "SPAXX", type: { code: "mutual_fund" } }, units: 1, price: 1 };
+  const nested = {
+    symbol: { symbol: { symbol: "VMMXX", type: { code: "mutual_fund" } }, exchange: {} },
+    units: 1, price: 1,
+  };
+  assert.equal(getSnapTradeSymbolMeta(flat).typeCode, "etf");
+  assert.equal(getSnapTradeSymbolMeta(nested).typeCode, "etf");
+});
+
+test("symbol-meta: currency resolved from position-level when symbol-level missing", () => {
+  const pos = {
+    symbol: { symbol: "VTI", description: "Vanguard Total Market ETF", type: { code: "etf" } },
+    units: 5, price: 220,
+    currency: { code: "USD" },
+  };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.currencyCode, "USD");
+});
+
+test("symbol-meta: position loop uses normalized symbolStr for asset_symbol insert (not object)", () => {
+  // Simulates the insert payload construction — asset_symbol must be a string
+  const pos = {
+    symbol: {
+      symbol: { id: "abc", symbol: "SPAXX", description: "MM Fund", currency: { code: "USD" }, type: { code: "mutual_fund" } },
+      exchange: { id: "efg", code: "NASDAQ" },
+    },
+    units: 500, price: 1.0, average_purchase_price: 1.0, market_value: 500,
+  };
+  const meta = getSnapTradeSymbolMeta(pos);
+  const assetSymbol = meta.symbolStr;
+  assert.equal(typeof assetSymbol, "string");
+  assert.equal(assetSymbol, "SPAXX");
+  assert.notEqual(assetSymbol, "[object Object]");
+  // Confirm insert payload would use a string
+  const insertPayload = { asset_symbol: assetSymbol, asset_name: meta.description ?? assetSymbol };
+  assert.equal(typeof insertPayload.asset_symbol, "string");
+});
+
+test("symbol-meta: same symbol from different accounts produces same string key (no cross-account collision)", () => {
+  const makePos = (acctId) => ({
+    symbol: { symbol: { id: "abc", symbol: "SPAXX", description: "MM Fund", currency: { code: "USD" }, type: { code: "mutual_fund" } }, exchange: {} },
+    units: 100, price: 1.0,
+  });
+  const meta1 = getSnapTradeSymbolMeta(makePos("acct-1"));
+  const meta2 = getSnapTradeSymbolMeta(makePos("acct-2"));
+  assert.equal(meta1.symbolStr, meta2.symbolStr);
+  assert.equal(meta1.symbolStr, "SPAXX");
+  // Uniqueness in DB is (financial_account_id, asset_symbol) so same symbol in different accounts is fine
+});

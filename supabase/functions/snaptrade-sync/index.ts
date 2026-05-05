@@ -47,6 +47,72 @@ async function snapTradeGetPositions(clientId: string, consumerKey: string, acco
   return snapTradeGet(clientId, consumerKey, `/api/v1/accounts/${accountId}/positions`, queryParams)
 }
 
+/**
+ * Extract a normalized string ticker and metadata from a SnapTrade position.
+ *
+ * SnapTrade positions use two different shapes for position.symbol:
+ *   Flat UniversalSymbol:   { id, symbol: "SPAXX", raw_symbol, description, currency, type, ... }
+ *   Nested BrokerageSymbol: { symbol: { id, symbol: "SPAXX", ... }, exchange: { ... } }
+ * Never pass position.symbol directly into asset_symbol — it is an object in the nested case.
+ */
+function getSnapTradeSymbolMeta(position: unknown): {
+  symbolStr: string | null
+  symbolOriginalType: string
+  description: string | null
+  typeCode: string
+  currencyCode: string | null
+} {
+  const raw = (position as Record<string, unknown>)?.symbol
+  const symbolOriginalType = raw === null ? "null" : typeof raw
+
+  if (typeof raw === "string") {
+    const t = raw.trim()
+    return { symbolStr: t || null, symbolOriginalType, description: t || null, typeCode: "equity", currencyCode: null }
+  }
+  if (!raw || typeof raw !== "object") {
+    return { symbolStr: null, symbolOriginalType, description: null, typeCode: "equity", currencyCode: null }
+  }
+  const outer = raw as Record<string, unknown>
+
+  // Nested BrokerageSymbol: outer.symbol is the inner UniversalSymbol object
+  // Flat UniversalSymbol: outer.symbol is the string ticker
+  let secObj: Record<string, unknown>
+  if (outer.symbol !== null && outer.symbol !== undefined && typeof outer.symbol === "object") {
+    secObj = outer.symbol as Record<string, unknown>
+  } else {
+    secObj = outer
+  }
+
+  const symbolStr =
+    typeof secObj.symbol === "string" ? secObj.symbol.trim() || null
+    : typeof secObj.raw_symbol === "string" ? secObj.raw_symbol.trim() || null
+    : null
+
+  const description = typeof secObj.description === "string" ? secObj.description : null
+
+  const typeObj = secObj.type as Record<string, unknown> | null | undefined
+  const rawTypeCode = (typeof typeObj?.code === "string" ? typeObj.code : "equity").toLowerCase()
+  const typeCode = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode
+
+  const symCurr = secObj.currency
+  const posCurr = (position as Record<string, unknown>)?.currency
+  let currencyCode: string | null = null
+  if (symCurr && typeof symCurr === "object") {
+    currencyCode = typeof (symCurr as Record<string, unknown>).code === "string"
+      ? (symCurr as Record<string, unknown>).code as string : null
+  } else if (typeof symCurr === "string") {
+    currencyCode = symCurr
+  }
+  if (!currencyCode && posCurr && typeof posCurr === "object") {
+    currencyCode = typeof (posCurr as Record<string, unknown>).code === "string"
+      ? (posCurr as Record<string, unknown>).code as string : null
+  } else if (!currencyCode && typeof posCurr === "string") {
+    currencyCode = posCurr
+  }
+
+  return { symbolStr, symbolOriginalType, description, typeCode, currencyCode }
+}
+
 interface AccountBreakdown {
   snaptradeAccountId: string
   name: string
@@ -517,7 +583,10 @@ serve(async (req) => {
       // Log first position shape to verify parser matches actual SnapTrade response
       const firstPos = positions[0] as Record<string, unknown>
       const symObjFirst = firstPos?.symbol as Record<string, unknown> | undefined
+      const symObjFirstType = typeof firstPos?.symbol
+      const symObjFirstSymbolType = symObjFirst ? typeof symObjFirst.symbol : "n/a"
       console.log(`[snaptrade-sync] First position keys: [${Object.keys(firstPos).join(", ")}]`)
+      console.log(`[snaptrade-sync] First position.symbol type: ${symObjFirstType} | .symbol.symbol type: ${symObjFirstSymbolType}`)
       console.log(`[snaptrade-sync] First position.symbol keys: [${symObjFirst ? Object.keys(symObjFirst).join(", ") : "n/a"}]`)
       console.log(`[snaptrade-sync] Field check: units=${firstPos?.units !== undefined} | price=${firstPos?.price !== undefined} | average_purchase_price=${firstPos?.average_purchase_price !== undefined} | open_pnl=${firstPos?.open_pnl !== undefined} | market_value=${firstPos?.market_value !== undefined}`)
 
@@ -530,33 +599,29 @@ serve(async (req) => {
 
       for (const pos of positions) {
         const p = pos as Record<string, unknown>
-        const symbolObj = p?.symbol as Record<string, unknown>
-        const symbol = (symbolObj?.symbol as string | undefined) ?? ""
+        const meta = getSnapTradeSymbolMeta(p)
+        const symbol = meta.symbolStr
+
         if (!symbol) {
           totalSkippedPositions++
           const symbolPreview = JSON.stringify(p?.symbol)?.substring(0, 100) ?? "null"
-          console.warn(`[snaptrade-sync] Position skipped | snapAcctId: ${acctId} | reason: symbol_field_missing | raw_symbol: ${symbolPreview}`)
+          console.warn(`[snaptrade-sync] Position skipped | snapAcctId: ${acctId} | reason: symbol_field_missing_or_unresolvable | raw_symbol_type: ${meta.symbolOriginalType} | preview: ${symbolPreview}`)
           continue
         }
 
-        const description = (symbolObj?.description as string | undefined) ?? symbol
-        // Derive asset_type from SnapTrade symbol type code; normalize mutual_fund → etf
-        const rawTypeCode = ((symbolObj?.type as Record<string, unknown>)?.code as string | undefined ?? "equity").toLowerCase()
-        const assetType = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode
-        const quantity = (p?.units as number) ?? 0
-        const price = (p?.price as number) ?? 0
+        const description = meta.description ?? symbol
+        const assetType = meta.typeCode
+        const quantity = typeof p?.units === "number" ? p.units as number : Number(p?.units ?? 0)
+        const price = typeof p?.price === "number" ? p.price as number : Number(p?.price ?? 0)
         // SnapTrade returns average_purchase_price (per-unit cost), not a total book_value field
-        const avgPurchasePrice = (p?.average_purchase_price as number) ?? price
+        const avgPurchasePrice = typeof p?.average_purchase_price === "number" ? p.average_purchase_price as number : Number(p?.average_purchase_price ?? price)
         const bookValue = avgPurchasePrice * quantity
-        const marketValue = (p?.market_value as number) ?? (quantity * price)
+        const marketValue = typeof p?.market_value === "number" ? p.market_value as number : (quantity * price)
         const unrealizedGain = marketValue - bookValue
-
-        // Normalize currency: guard against object value (e.g. {code:"USD"}) from SnapTrade symbol
-        const symbolCurrency = (symbolObj?.currency as Record<string, unknown>)?.code as string | undefined
-        const positionCurrency = (symbolCurrency ?? currency).substring(0, 3)
+        const positionCurrency = ((meta.currencyCode ?? currency) as string).substring(0, 3)
 
         syncedSymbols.push(symbol)
-        console.log(`[snaptrade-sync] Position | symbol: ${symbol} | qty: ${quantity} | price: ${price} | mktVal: ${marketValue} | assetType: ${assetType} | currency: ${positionCurrency}`)
+        console.log(`[snaptrade-sync] Position | symbol: ${symbol} (orig_type: ${meta.symbolOriginalType}) | qty: ${quantity} | price: ${price} | mktVal: ${marketValue} | assetType: ${assetType} | currency: ${positionCurrency}`)
 
         // Look up only active (non-deleted) positions to prevent soft-deleted rows
         // from causing silent errors or duplicate active rows on upsert.
