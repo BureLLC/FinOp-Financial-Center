@@ -21,5 +21,14 @@ export async function POST(
     return NextResponse.json({ error: error.message }, { status });
   }
 
-  return NextResponse.json({ success: true });
+  const { data: auditRow } = await supabase
+    .from("automation_audit_log")
+    .select("id")
+    .eq("suggestion_id", id)
+    .eq("triggered_by", "user_accept")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return NextResponse.json({ success: true, auditId: auditRow?.id ?? null });
 }

@@ -153,6 +153,8 @@ export default function TransactionsPage() {
   const [suggestions, setSuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
   // Which suggestion panel is open (by transaction id)
   const [openSuggestion, setOpenSuggestion] = useState<string | null>(null);
+  // Ephemeral undo entry — lost on page refresh (intentional)
+  const [undoEntry, setUndoEntry] = useState<{ txId: string; auditId: string; prevCategory: string | null; category: string } | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -344,6 +346,9 @@ export default function TransactionsPage() {
   const acceptSuggestion = async (suggestionId: string, txId: string, category: string) => {
     const res = await fetch(`/api/automation/suggestions/${suggestionId}/accept`, { method: "POST" });
     if (!res.ok) return;
+    const resData = await res.json().catch(() => ({}));
+    const auditId: string | null = resData.auditId ?? null;
+    const prevCategory = transactions.find((t) => t.id === txId)?.category ?? null;
     setTransactions((prev) =>
       prev.map((t) => (t.id === txId ? { ...t, category } : t))
     );
@@ -353,6 +358,23 @@ export default function TransactionsPage() {
       return next;
     });
     setOpenSuggestion(null);
+    if (auditId) {
+      setUndoEntry({ txId, auditId, prevCategory, category });
+    }
+  };
+
+  const undoAccept = async () => {
+    if (!undoEntry) return;
+    const { txId, auditId, prevCategory } = undoEntry;
+    setUndoEntry(null);
+    const res = await fetch(`/api/automation/audit/${auditId}/undo`, { method: "POST" });
+    if (res.ok) {
+      setTransactions((prev) =>
+        prev.map((t) => (t.id === txId ? { ...t, category: prevCategory } : t))
+      );
+    }
+    // 409 = stale (transaction was changed since accept) — silently drop undo option
+    // other errors — undo is best-effort, no recovery needed
   };
 
   const rejectSuggestion = async (suggestionId: string, txId: string) => {
@@ -447,6 +469,34 @@ export default function TransactionsPage() {
           </select>
           <span style={{ fontSize: "12px", color: "#334155", marginLeft: "auto" }}>{filtered.length} transactions</span>
         </div>
+
+        {/* Undo toast */}
+        {undoEntry && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: "12px", padding: "10px 14px", marginBottom: "12px",
+            background: "rgba(99,102,241,0.08)",
+            border: "1px solid rgba(99,102,241,0.25)",
+            borderRadius: "9px",
+          }}>
+            <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+              Categorized as <strong style={{ color: "#e2e8f0" }}>{undoEntry.category}</strong>
+            </span>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 }}>
+              <button onClick={undoAccept} style={{
+                padding: "4px 12px", fontSize: "11px", fontWeight: 600,
+                background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.4)",
+                borderRadius: "6px", color: "#818cf8", cursor: "pointer",
+              }}>
+                Undo
+              </button>
+              <button onClick={() => setUndoEntry(null)} style={{
+                padding: "4px 6px", background: "transparent", border: "none",
+                color: "#475569", cursor: "pointer", fontSize: "13px",
+              }}>✕</button>
+            </div>
+          </div>
+        )}
 
         {/* List */}
         {loading ? (
