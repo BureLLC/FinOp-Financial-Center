@@ -1746,3 +1746,237 @@ test("regression: multi-user isolation — user A connections do not appear for 
   assert.equal(userBConnections.length, 1);
   assert.equal(userBConnections[0].institution_name, "Fidelity");
 });
+
+// ─── SnapTrade Account Response Parsing ──────────────────────────────────────
+// Pure functions mirroring the field extraction logic in snaptrade-sync/index.ts.
+
+function parseSnapTradeAccount(raw) {
+  const balanceObj = raw?.balance?.total;
+  const currentBalance = balanceObj?.amount ?? 0;
+  const currency = balanceObj?.currency ?? "USD";
+  const acctName = raw?.name ?? "Investment Account";
+  const rawType = raw?.raw_type ?? null;
+  const acctStatus = raw?.status ?? "open";
+  const mask = raw?.number?.replace(/\*/g, "").slice(-4) ?? null;
+  const isClosed = acctStatus.toLowerCase() === "closed" && currentBalance === 0;
+  return { currentBalance, currency, acctName, rawType, acctStatus, mask, isClosed };
+}
+
+function resolveInstitutionName(rawAccounts, prevInstitutionName) {
+  const firstAcct = rawAccounts.length > 0 ? rawAccounts[0] : null;
+  const fromApi =
+    firstAcct?.institution_name ??
+    firstAcct?.brokerage_authorization?.brokerage?.name ??
+    null;
+  return fromApi ?? prevInstitutionName ?? "Brokerage";
+}
+
+// Pure function mirroring the per-account breakdown logic in canonicalFinancialData.ts.
+function computePerAccountBreakdown(investmentAccounts, allPositions) {
+  const investmentAccountIds = new Set(investmentAccounts.map(a => a.id));
+  const positions = allPositions.filter(
+    p => p.financial_account_id && investmentAccountIds.has(p.financial_account_id)
+  );
+  const positionsByAccount = new Map();
+  const positionsCountByAccount = new Map();
+  for (const p of positions) {
+    const acctId = p.financial_account_id;
+    positionsByAccount.set(acctId, (positionsByAccount.get(acctId) ?? 0) + toNum(p.last_valuation));
+    positionsCountByAccount.set(acctId, (positionsCountByAccount.get(acctId) ?? 0) + 1);
+  }
+  return investmentAccounts.map(acct => {
+    const posVal = positionsByAccount.get(acct.id) ?? 0;
+    const posCount = positionsCountByAccount.get(acct.id) ?? 0;
+    const balVal = toNum(acct.current_balance);
+    let valueSource;
+    if (posVal > 0) {
+      valueSource = "positions";
+    } else if (balVal > 0) {
+      valueSource = "fallback";
+    } else {
+      valueSource = "missing";
+    }
+    return {
+      accountId: acct.id,
+      accountName: acct.account_name ?? acct.id,
+      institutionName: acct.institution_name ?? null,
+      mask: acct.mask ?? null,
+      positionsCount: posCount,
+      positionsValue: posVal,
+      balanceValue: balVal,
+      valueSource,
+    };
+  });
+}
+
+test("snaptrade-parse: extracts balance from balance.total.amount and mask from number", () => {
+  const raw = {
+    id: "acc1", name: "Brokerage Account",
+    balance: { total: { amount: 75000, currency: "USD" } },
+    status: "open", raw_type: "brokerage", number: "****1234",
+  };
+  const parsed = parseSnapTradeAccount(raw);
+  assert.equal(parsed.currentBalance, 75000);
+  assert.equal(parsed.currency, "USD");
+  assert.equal(parsed.mask, "1234");
+  assert.equal(parsed.rawType, "brokerage");
+  assert.equal(parsed.isClosed, false);
+});
+
+test("snaptrade-parse: missing balance fields default to 0 and USD", () => {
+  const raw = { id: "acc2", name: "Empty Account", status: "open" };
+  const parsed = parseSnapTradeAccount(raw);
+  assert.equal(parsed.currentBalance, 0);
+  assert.equal(parsed.currency, "USD");
+  assert.equal(parsed.mask, null);
+  assert.equal(parsed.rawType, null);
+});
+
+test("snaptrade-parse: closed account with zero balance is flagged for skip", () => {
+  const raw = {
+    id: "acc3", name: "Old Account",
+    balance: { total: { amount: 0, currency: "USD" } },
+    status: "CLOSED", raw_type: "brokerage", number: "****9999",
+  };
+  const parsed = parseSnapTradeAccount(raw);
+  assert.equal(parsed.isClosed, true);
+});
+
+test("snaptrade-parse: closed account with non-zero balance is NOT skipped", () => {
+  const raw = {
+    id: "acc4", name: "Partial Close",
+    balance: { total: { amount: 500, currency: "USD" } },
+    status: "CLOSED", raw_type: "brokerage",
+  };
+  const parsed = parseSnapTradeAccount(raw);
+  assert.equal(parsed.isClosed, false);
+});
+
+test("snaptrade-institution: uses institution_name from first account", () => {
+  const accounts = [{ institution_name: "Fidelity", balance: { total: { amount: 1000 } } }];
+  assert.equal(resolveInstitutionName(accounts, null), "Fidelity");
+});
+
+test("snaptrade-institution: falls back to brokerage_authorization.brokerage.name", () => {
+  const accounts = [{ brokerage_authorization: { brokerage: { name: "TD Ameritrade" } } }];
+  assert.equal(resolveInstitutionName(accounts, null), "TD Ameritrade");
+});
+
+test("snaptrade-institution: preserves existing name when API returns no institution fields", () => {
+  const accounts = [{ id: "a1", name: "My Account" }];
+  assert.equal(resolveInstitutionName(accounts, "Fidelity"), "Fidelity");
+});
+
+test("snaptrade-institution: defaults to 'Brokerage' when no API data and no previous name", () => {
+  assert.equal(resolveInstitutionName([{ id: "a1" }], null), "Brokerage");
+});
+
+test("snaptrade-institution: zero accounts sync preserves previous institution name", () => {
+  assert.equal(resolveInstitutionName([], "Fidelity"), "Fidelity");
+});
+
+test("snaptrade-institution: zero accounts with no previous name defaults to 'Brokerage'", () => {
+  assert.equal(resolveInstitutionName([], null), "Brokerage");
+});
+
+// ─── perAccountBreakdown ─────────────────────────────────────────────────────
+
+test("perAccountBreakdown: account with positions → valueSource=positions", () => {
+  const accounts = [{ id: "inv1", account_name: "My 401k", institution_name: "Fidelity", mask: "1234", current_balance: 50000, account_type: "investment" }];
+  const positions = [{ financial_account_id: "inv1", last_valuation: 55000 }];
+  const breakdown = computePerAccountBreakdown(accounts, positions);
+  assert.equal(breakdown.length, 1);
+  assert.equal(breakdown[0].valueSource, "positions");
+  assert.equal(breakdown[0].positionsValue, 55000);
+  assert.equal(breakdown[0].positionsCount, 1);
+  assert.equal(breakdown[0].institutionName, "Fidelity");
+  assert.equal(breakdown[0].mask, "1234");
+});
+
+test("perAccountBreakdown: account with no positions but positive balance → valueSource=fallback", () => {
+  const accounts = [{ id: "inv1", account_name: "Roth IRA", institution_name: "Schwab", mask: null, current_balance: 30000, account_type: "investment" }];
+  const breakdown = computePerAccountBreakdown(accounts, []);
+  assert.equal(breakdown[0].valueSource, "fallback");
+  assert.equal(breakdown[0].positionsCount, 0);
+  assert.equal(breakdown[0].positionsValue, 0);
+  assert.equal(breakdown[0].balanceValue, 30000);
+});
+
+test("perAccountBreakdown: account with no positions and zero balance → valueSource=missing", () => {
+  const accounts = [{ id: "inv1", account_name: "Empty Account", institution_name: null, mask: null, current_balance: 0, account_type: "investment" }];
+  const breakdown = computePerAccountBreakdown(accounts, []);
+  assert.equal(breakdown[0].valueSource, "missing");
+  assert.equal(breakdown[0].positionsValue, 0);
+  assert.equal(breakdown[0].balanceValue, 0);
+});
+
+test("perAccountBreakdown: multiple accounts per institution have independent breakdowns", () => {
+  const accounts = [
+    { id: "inv1", account_name: "Taxable", institution_name: "Fidelity", mask: "1111", current_balance: 50000, account_type: "investment" },
+    { id: "inv2", account_name: "IRA",     institution_name: "Fidelity", mask: "2222", current_balance: 30000, account_type: "investment" },
+  ];
+  const positions = [
+    { financial_account_id: "inv1", last_valuation: 52000 },
+    { financial_account_id: "inv1", last_valuation: 3000 },
+    // inv2 has no positions
+  ];
+  const breakdown = computePerAccountBreakdown(accounts, positions);
+  assert.equal(breakdown.length, 2);
+  const inv1 = breakdown.find(b => b.accountId === "inv1");
+  const inv2 = breakdown.find(b => b.accountId === "inv2");
+  assert.equal(inv1.valueSource, "positions");
+  assert.equal(inv1.positionsValue, 55000);
+  assert.equal(inv1.positionsCount, 2);
+  assert.equal(inv2.valueSource, "fallback");
+  assert.equal(inv2.positionsValue, 0);
+  assert.equal(inv2.balanceValue, 30000);
+});
+
+test("perAccountBreakdown: positions from one account do not bleed into another", () => {
+  const accounts = [
+    { id: "inv1", account_name: "Account A", current_balance: 0, account_type: "investment" },
+    { id: "inv2", account_name: "Account B", current_balance: 0, account_type: "investment" },
+  ];
+  const positions = [{ financial_account_id: "inv1", last_valuation: 10000 }];
+  const breakdown = computePerAccountBreakdown(accounts, positions);
+  const inv2 = breakdown.find(b => b.accountId === "inv2");
+  assert.equal(inv2.positionsValue, 0);
+  assert.equal(inv2.valueSource, "missing");
+});
+
+// ─── Cash/Investments boundary ────────────────────────────────────────────────
+
+test("calcTotalCash: explicitly excludes SnapTrade investment accounts", () => {
+  const accounts = [
+    { account_type: "depository", account_subtype: "checking", current_balance: 5000 },
+    { account_type: "investment", account_subtype: "brokerage", current_balance: 100000 }, // SnapTrade
+    { account_type: "investment", account_subtype: "ira",       current_balance: 50000 },  // SnapTrade
+  ];
+  assert.equal(calcTotalCash(accounts), 5000);
+});
+
+test("canonical investments: depository accounts do not contribute to investment total", () => {
+  const allAccounts = [
+    { id: "bank1", account_type: "depository", current_balance: 5000 },
+    { id: "inv1",  account_type: "investment", current_balance: 50000 },
+  ];
+  const investmentAccounts = allAccounts.filter(a => a.account_type === "investment");
+  const positions = [{ financial_account_id: "inv1", last_valuation: 52000 }];
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, positions, allAccounts);
+  // positionsValue comes only from investment accounts; bank cash not counted
+  assert.equal(result.positionsValue, 52000);
+  assert.equal(result.totalInvestmentValue, 52000);
+  assert.equal(result.brokerageAccountCount, 1);
+});
+
+test("canonical investments: plaid bank accounts with depository type never counted as investments", () => {
+  const allAccounts = [
+    { id: "plaid-chk", account_type: "depository", account_subtype: "checking", current_balance: 10000 },
+    { id: "plaid-sav", account_type: "depository", account_subtype: "savings",  current_balance: 20000 },
+  ];
+  const investmentAccounts = []; // no investment accounts
+  const result = computeCanonicalInvestmentMetadata(investmentAccounts, [], allAccounts);
+  assert.equal(result.dataStatus, "no_brokerage_connection");
+  assert.equal(result.brokerageAccountCount, 0);
+  assert.equal(result.totalInvestmentValue, 0);
+});

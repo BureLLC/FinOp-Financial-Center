@@ -270,7 +270,7 @@ export default function ConnectionsPage() {
   };
 
 
-  const handleSync = async (connectionId: string) => {
+  const handleSync = async (connectionId: string, provider: string) => {
     setSyncingId(connectionId);
     setSyncMessage(null);
 
@@ -278,22 +278,28 @@ export default function ConnectionsPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      const response = await fetch(
-        `${functionBase}/orchestrate-refresh`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-            "Authorization": `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({ connectionId }),
-        }
-      );
+      const headers = {
+        "Content-Type": "application/json",
+        "apikey": process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        "Authorization": `Bearer ${session.access_token}`,
+      };
+
+      // SnapTrade brokerage connections are synced directly via snaptrade-sync.
+      // orchestrate-refresh only handles Plaid — it would silently skip SnapTrade.
+      const endpoint = provider === "snaptrade"
+        ? `${functionBase}/snaptrade-sync`
+        : `${functionBase}/orchestrate-refresh`;
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ connectionId }),
+      });
 
       if (response.ok) {
+        const delay = provider === "snaptrade" ? 3000 : 6000;
         setSyncMessage("Sync started. Refreshing in a moment...");
-        setTimeout(() => { loadData(); setSyncMessage(null); }, 6000);
+        setTimeout(() => { loadData(); setSyncMessage(null); }, delay);
       } else {
         setSyncMessage("Sync failed. Please try again.");
       }
@@ -650,7 +656,7 @@ export default function ConnectionsPage() {
 
                     {/* Sync Now */}
                     <button
-                      onClick={() => handleSync(conn.id)}
+                      onClick={() => handleSync(conn.id, conn.provider)}
                       disabled={isSyncing || isActing}
                       style={{
                         padding: "8px 16px",
