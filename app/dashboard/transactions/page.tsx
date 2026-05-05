@@ -155,6 +155,9 @@ export default function TransactionsPage() {
   const [openSuggestion, setOpenSuggestion] = useState<string | null>(null);
   // Ephemeral undo entry — lost on page refresh (intentional)
   const [undoEntry, setUndoEntry] = useState<{ txId: string; auditId: string; prevCategory: string | null; category: string } | null>(null);
+  // Which transaction's suggestion is in the reason-picker step
+  const [rejectingTxId, setRejectingTxId] = useState<string | null>(null);
+  const [rejectError, setRejectError] = useState<string | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -377,14 +380,24 @@ export default function TransactionsPage() {
     // other errors — undo is best-effort, no recovery needed
   };
 
-  const rejectSuggestion = async (suggestionId: string, txId: string) => {
-    const res = await fetch(`/api/automation/suggestions/${suggestionId}/reject`, { method: "POST" });
-    if (!res.ok) return;
+  const rejectSuggestion = async (suggestionId: string, txId: string, reason: string) => {
+    setRejectError(null);
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rejection_reason: reason }),
+    });
+    if (!res.ok) {
+      setRejectError("Failed to reject. Please try again.");
+      return;
+    }
     setSuggestions((prev) => {
       const next = new Map(prev);
       next.delete(txId);
       return next;
     });
+    setRejectingTxId(null);
+    setRejectError(null);
     setOpenSuggestion(null);
   };
 
@@ -568,7 +581,7 @@ export default function TransactionsPage() {
                         )}
                         {suggestion && (
                           <button
-                            onClick={(e) => { e.stopPropagation(); setOpenSuggestion(suggestionOpen ? null : tx.id); }}
+                            onClick={(e) => { e.stopPropagation(); setOpenSuggestion(suggestionOpen ? null : tx.id); if (suggestionOpen) { setRejectingTxId(null); setRejectError(null); } }}
                             style={{
                               fontSize: "10px", fontWeight: 600, color: "#818cf8",
                               background: "rgba(99,102,241,0.12)",
@@ -623,30 +636,66 @@ export default function TransactionsPage() {
                           {suggestion.reason}
                         </div>
                       )}
-                      <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); acceptSuggestion(suggestion.id, tx.id, suggestion.suggested_action.category); }}
-                          style={{
-                            padding: "6px 14px", fontSize: "12px", fontWeight: 600,
-                            background: "rgba(99,102,241,0.2)",
-                            border: "1px solid rgba(99,102,241,0.4)",
-                            borderRadius: "7px", color: "#818cf8", cursor: "pointer",
-                          }}
-                        >
-                          Accept
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); rejectSuggestion(suggestion.id, tx.id); }}
-                          style={{
-                            padding: "6px 14px", fontSize: "12px", fontWeight: 600,
-                            background: "transparent",
-                            border: "1px solid rgba(255,255,255,0.08)",
-                            borderRadius: "7px", color: "#475569", cursor: "pointer",
-                          }}
-                        >
-                          Reject
-                        </button>
-                      </div>
+                      {rejectingTxId === tx.id ? (
+                        <div style={{ marginTop: "10px" }}>
+                          <div style={{ fontSize: "10px", fontWeight: 700, color: "#475569", letterSpacing: "0.08em", marginBottom: "7px" }}>
+                            WHY ARE YOU REJECTING THIS?
+                          </div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                            {([
+                              { reason: "wrong_merchant",    label: "Wrong merchant" },
+                              { reason: "wrong_category",    label: "Wrong category" },
+                              { reason: "not_recurring",     label: "Not recurring" },
+                              { reason: "personal_preference", label: "Personal preference" },
+                              { reason: "other",             label: "Other" },
+                              { reason: "skipped",           label: "Skip" },
+                            ] as const).map(({ reason, label }) => (
+                              <button
+                                key={reason}
+                                onClick={(e) => { e.stopPropagation(); rejectSuggestion(suggestion.id, tx.id, reason); }}
+                                style={{
+                                  padding: "5px 11px", fontSize: "11px", fontWeight: 500,
+                                  background: "rgba(255,255,255,0.04)",
+                                  border: "1px solid rgba(255,255,255,0.1)",
+                                  borderRadius: "7px", color: "#94a3b8", cursor: "pointer",
+                                }}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          {rejectError && (
+                            <div style={{ marginTop: "8px", fontSize: "11px", color: "#ef4444" }}>
+                              {rejectError}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); acceptSuggestion(suggestion.id, tx.id, suggestion.suggested_action.category); }}
+                            style={{
+                              padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                              background: "rgba(99,102,241,0.2)",
+                              border: "1px solid rgba(99,102,241,0.4)",
+                              borderRadius: "7px", color: "#818cf8", cursor: "pointer",
+                            }}
+                          >
+                            Accept
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setRejectingTxId(tx.id); setRejectError(null); }}
+                            style={{
+                              padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                              background: "transparent",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              borderRadius: "7px", color: "#475569", cursor: "pointer",
+                            }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
