@@ -1,6 +1,6 @@
-// Phase 1 automation types.
-// All type aliases prefixed Phase1* document what is valid in this phase.
-// Later phases will extend these without breaking Phase 1 consumers.
+// Automation types for Phase 1 and Phase 4.
+// Phase1* aliases document what is valid in Phase 1.
+// Phase4* aliases extend Phase 1 types without breaking existing consumers.
 
 export type Phase1RuleType = 'transaction_category';
 export type Phase1MatcherType = 'merchant_normalized' | 'description_pattern';
@@ -82,13 +82,28 @@ export interface AutomationAuditEntry {
     | 'set_subcategory'
     | 'undo_set_category'
     | 'undo_set_subcategory'
-    | 'user_manual_category';
+    | 'user_manual_category'
+    | 'mark_business_candidate'
+    | 'undo_mark_business_candidate';
   previous_value: Record<string, unknown> | null;
   new_value: Record<string, unknown> | null;
   confidence: number | null;
   triggered_by: Phase1TriggeredBy;
   undo_blocked_reason: string | null;
   created_at: string;
+}
+
+// ─── Phase 4 type extensions ──────────────────────────────────────────────────
+
+export type Phase4ActionType = Phase1ActionType | 'mark_business_candidate';
+export type Phase4SuggestionType = Phase1RuleType | 'business_expense_candidate';
+
+// Action config for business expense candidate suggestions.
+// mixed_use: true when the merchant matches MIXED_USE_CATEGORIES.
+// reason: human-readable explanation surfaced in the Phase 4 PR B UI.
+export interface BusinessExpenseActionConfig {
+  mixed_use: boolean;
+  reason: string;
 }
 
 // ─── Match result returned by matcherEngine ───────────────────────────────────
