@@ -2388,8 +2388,48 @@ test("sync-response: fallback remains when accounts synced but positions missing
 });
 
 // ─── getSnapTradeSymbolMeta normalization tests ───────────────────────────────
-// Mirrors the helper added to supabase/functions/snaptrade-sync/index.ts.
-// Verifies all three SnapTrade symbol shapes return a normalized string ticker.
+// Mirrors the helpers added to supabase/functions/snaptrade-sync/index.ts.
+// Verifies all three SnapTrade symbol shapes return a normalized string ticker
+// and that SnapTrade asset type codes map to DB-allowed values.
+
+const ALLOWED_ASSET_TYPES = new Set([
+  "equity", "crypto", "etf", "bond", "option", "future", "forex", "swap", "cash", "liability",
+]);
+
+function normalizeSnapTradeAssetType(code, description) {
+  const c = (code ?? "").toLowerCase().trim();
+  const d = (description ?? "").toLowerCase();
+
+  if (ALLOWED_ASSET_TYPES.has(c)) return c;
+
+  switch (c) {
+    case "cs":  return "equity";
+    case "ad":  return "equity";
+    case "pfd": return "equity";
+    case "re":  return "equity";
+    case "et":  return "etf";
+    case "oef": return "etf";
+    case "cef": return "etf";
+    case "mutual_fund": return "etf";
+    case "fi":  return "bond";
+    case "cc":  return "crypto";
+    case "op":  return "option";
+    case "fu":  return "future";
+    case "fx":  return "forex";
+    case "sw":  return "swap";
+    case "ca":  return "cash";
+  }
+
+  if (d.includes("fund") || d.includes("etf")) return "etf";
+  if (d.includes("bond") || d.includes("fixed income") || d.includes("treasury")) return "bond";
+  if (d.includes("crypto") || d.includes("bitcoin")) return "crypto";
+  if (d.includes("option")) return "option";
+  if (d.includes("future")) return "future";
+  if (d.includes("forex") || d.includes("currency")) return "forex";
+  if (d.includes("cash") || d.includes("money market")) return "cash";
+
+  return "equity";
+}
 
 function getSnapTradeSymbolMeta(position) {
   const raw = position?.symbol;
@@ -2419,8 +2459,9 @@ function getSnapTradeSymbolMeta(position) {
   const description = typeof secObj.description === "string" ? secObj.description : null;
 
   const typeObj = secObj.type;
-  const rawTypeCode = (typeof typeObj?.code === "string" ? typeObj.code : "equity").toLowerCase();
-  const typeCode = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode;
+  const rawTypeCode = typeof typeObj?.code === "string" ? typeObj.code : null;
+  const rawTypeDesc = typeof typeObj?.description === "string" ? typeObj.description : null;
+  const typeCode = normalizeSnapTradeAssetType(rawTypeCode, rawTypeDesc);
 
   const symCurr = secObj.currency;
   const posCurr = position?.currency;
@@ -2561,4 +2602,85 @@ test("symbol-meta: same symbol from different accounts produces same string key 
   assert.equal(meta1.symbolStr, meta2.symbolStr);
   assert.equal(meta1.symbolStr, "SPAXX");
   // Uniqueness in DB is (financial_account_id, asset_symbol) so same symbol in different accounts is fine
+});
+
+// ─── normalizeSnapTradeAssetType tests ───────────────────────────────────────
+// Verifies SnapTrade raw type codes map to DB-allowed values.
+// Allowed constraint: equity, crypto, etf, bond, option, future, forex, swap, cash, liability
+
+test("asset-type: oef (Open Ended Fund) maps to etf — not inserted raw", () => {
+  assert.equal(normalizeSnapTradeAssetType("oef"), "etf");
+  assert.ok(ALLOWED_ASSET_TYPES.has(normalizeSnapTradeAssetType("oef")));
+});
+
+test("asset-type: et (Exchange Traded Fund) maps to etf", () => {
+  assert.equal(normalizeSnapTradeAssetType("et"), "etf");
+});
+
+test("asset-type: cs (Common Stock) maps to equity", () => {
+  assert.equal(normalizeSnapTradeAssetType("cs"), "equity");
+});
+
+test("asset-type: cef (Closed End Fund) maps to etf", () => {
+  assert.equal(normalizeSnapTradeAssetType("cef"), "etf");
+});
+
+test("asset-type: mutual_fund legacy code maps to etf", () => {
+  assert.equal(normalizeSnapTradeAssetType("mutual_fund"), "etf");
+});
+
+test("asset-type: fi (Fixed Income) maps to bond", () => {
+  assert.equal(normalizeSnapTradeAssetType("fi"), "bond");
+});
+
+test("asset-type: cc (Cryptocurrency) maps to crypto", () => {
+  assert.equal(normalizeSnapTradeAssetType("cc"), "crypto");
+});
+
+test("asset-type: allowed values pass through unchanged", () => {
+  for (const v of ["equity", "crypto", "etf", "bond", "option", "future", "forex", "swap", "cash", "liability"]) {
+    assert.equal(normalizeSnapTradeAssetType(v), v, `${v} should pass through`);
+  }
+});
+
+test("asset-type: unknown code falls back to equity (valid DB value)", () => {
+  const result = normalizeSnapTradeAssetType("xyz_unknown");
+  assert.ok(ALLOWED_ASSET_TYPES.has(result), `fallback '${result}' must be a DB-allowed type`);
+  assert.equal(result, "equity");
+});
+
+test("asset-type: null/empty code falls back to equity", () => {
+  assert.equal(normalizeSnapTradeAssetType(null), "equity");
+  assert.equal(normalizeSnapTradeAssetType(""), "equity");
+  assert.equal(normalizeSnapTradeAssetType(undefined), "equity");
+});
+
+test("asset-type: description-based fallback for Open Ended Fund description", () => {
+  assert.equal(normalizeSnapTradeAssetType(null, "Open Ended Fund"), "etf");
+});
+
+test("asset-type: description-based fallback for bond description", () => {
+  assert.equal(normalizeSnapTradeAssetType(null, "Fixed Income Bond"), "bond");
+});
+
+test("asset-type: description-based fallback for money market (contains 'fund' → etf)", () => {
+  // "Money Market Fund" contains "fund" so maps to etf — consistent with all fund types.
+  // In practice SPAXX uses code "oef" which maps via the switch, not description.
+  assert.equal(normalizeSnapTradeAssetType(null, "Money Market Fund"), "etf");
+});
+
+test("asset-type: SPAXX (oef) insert payload never violates valid_asset_type constraint", () => {
+  // Simulates SPAXX which has SnapTrade type code "oef" — the exact failing case
+  const pos = {
+    symbol: {
+      symbol: { id: "abc", symbol: "SPAXX", description: "Fidelity Money Market Fund", currency: { code: "USD" }, type: { code: "oef", description: "Open Ended Fund" } },
+      exchange: {},
+    },
+    units: 1000, price: 1.0,
+  };
+  const meta = getSnapTradeSymbolMeta(pos);
+  assert.equal(meta.symbolStr, "SPAXX");
+  assert.ok(ALLOWED_ASSET_TYPES.has(meta.typeCode), `asset_type '${meta.typeCode}' must be DB-allowed`);
+  assert.notEqual(meta.typeCode, "oef");
+  assert.equal(meta.typeCode, "etf");
 });

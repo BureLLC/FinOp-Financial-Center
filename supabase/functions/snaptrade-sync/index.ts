@@ -47,6 +47,51 @@ async function snapTradeGetPositions(clientId: string, consumerKey: string, acco
   return snapTradeGet(clientId, consumerKey, `/api/v1/accounts/${accountId}/positions`, queryParams)
 }
 
+// Allowed values from positions.valid_asset_type DB check constraint.
+const ALLOWED_ASSET_TYPES = new Set([
+  "equity", "crypto", "etf", "bond", "option", "future", "forex", "swap", "cash", "liability",
+])
+
+/**
+ * Map a raw SnapTrade symbol type code (and optional description) to a value
+ * allowed by the positions.valid_asset_type DB check constraint.
+ * Never insert raw SnapTrade codes (e.g. "oef", "et", "cs") directly.
+ */
+function normalizeSnapTradeAssetType(code: string | null | undefined, description?: string | null): string {
+  const c = (code ?? "").toLowerCase().trim()
+  const d = (description ?? "").toLowerCase()
+
+  if (ALLOWED_ASSET_TYPES.has(c)) return c
+
+  switch (c) {
+    case "cs":  return "equity"   // Common Stock
+    case "ad":  return "equity"   // ADR
+    case "pfd": return "equity"   // Preferred Stock
+    case "re":  return "equity"   // REIT
+    case "et":  return "etf"      // Exchange Traded Fund
+    case "oef": return "etf"      // Open Ended Fund
+    case "cef": return "etf"      // Closed End Fund
+    case "mutual_fund": return "etf"
+    case "fi":  return "bond"     // Fixed Income
+    case "cc":  return "crypto"   // Cryptocurrency
+    case "op":  return "option"
+    case "fu":  return "future"
+    case "fx":  return "forex"
+    case "sw":  return "swap"
+    case "ca":  return "cash"
+  }
+
+  if (d.includes("fund") || d.includes("etf")) return "etf"
+  if (d.includes("bond") || d.includes("fixed income") || d.includes("treasury")) return "bond"
+  if (d.includes("crypto") || d.includes("bitcoin")) return "crypto"
+  if (d.includes("option")) return "option"
+  if (d.includes("future")) return "future"
+  if (d.includes("forex") || d.includes("currency")) return "forex"
+  if (d.includes("cash") || d.includes("money market")) return "cash"
+
+  return "equity"
+}
+
 /**
  * Extract a normalized string ticker and metadata from a SnapTrade position.
  *
@@ -91,8 +136,9 @@ function getSnapTradeSymbolMeta(position: unknown): {
   const description = typeof secObj.description === "string" ? secObj.description : null
 
   const typeObj = secObj.type as Record<string, unknown> | null | undefined
-  const rawTypeCode = (typeof typeObj?.code === "string" ? typeObj.code : "equity").toLowerCase()
-  const typeCode = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode
+  const rawTypeCode = typeof typeObj?.code === "string" ? typeObj.code : null
+  const rawTypeDesc = typeof typeObj?.description === "string" ? typeObj.description : null
+  const typeCode = normalizeSnapTradeAssetType(rawTypeCode, rawTypeDesc)
 
   const symCurr = secObj.currency
   const posCurr = (position as Record<string, unknown>)?.currency
