@@ -2684,3 +2684,67 @@ test("asset-type: SPAXX (oef) insert payload never violates valid_asset_type con
   assert.notEqual(meta.typeCode, "oef");
   assert.equal(meta.typeCode, "etf");
 });
+
+// ─── Plaid Link Token Configuration ──────────────────────────────────────────
+
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const plaidLinkTokenSrc = readFileSync(
+  resolve(__dirname, "../supabase/functions/plaid-create-link-token/index.ts"),
+  "utf8"
+);
+
+// Extract the products array from the source text
+function extractPlaidProducts(src) {
+  const match = src.match(/products:\s*\[([^\]]*)\]/);
+  if (!match) return null;
+  return match[1]
+    .split(",")
+    .map((s) => s.trim().replace(/['"]/g, ""))
+    .filter(Boolean);
+}
+
+test("plaid-link-token: default bank flow does not request liabilities", () => {
+  const products = extractPlaidProducts(plaidLinkTokenSrc);
+  assert.ok(products, "products array must be present in plaid-create-link-token/index.ts");
+  assert.ok(
+    !products.includes("liabilities"),
+    `Default bank flow must not include 'liabilities' — got: [${products.join(", ")}]. ` +
+    "Liabilities are only valid for credit/loan/mortgage accounts and cause NO_LIABILITY_ACCOUNTS for depository accounts."
+  );
+});
+
+test("plaid-link-token: default bank flow does not request investments (SnapTrade handles investments)", () => {
+  const products = extractPlaidProducts(plaidLinkTokenSrc);
+  assert.ok(products, "products array must be present in plaid-create-link-token/index.ts");
+  assert.ok(
+    !products.includes("investments"),
+    `Default bank flow must not include 'investments' via Plaid — got: [${products.join(", ")}]. ` +
+    "Investment sync is handled by SnapTrade, not Plaid."
+  );
+});
+
+test("plaid-link-token: default bank flow includes transactions for depository account sync", () => {
+  const products = extractPlaidProducts(plaidLinkTokenSrc);
+  assert.ok(products, "products array must be present in plaid-create-link-token/index.ts");
+  assert.ok(
+    products.includes("transactions"),
+    `Default bank flow must include 'transactions' — got: [${products.join(", ")}]`
+  );
+});
+
+test("plaid-link-token: only expected products are requested in default bank flow", () => {
+  const products = extractPlaidProducts(plaidLinkTokenSrc);
+  assert.ok(products, "products array must be present in plaid-create-link-token/index.ts");
+  const allowed = new Set(["transactions", "auth", "identity"]);
+  const unexpected = products.filter((p) => !allowed.has(p));
+  assert.deepEqual(
+    unexpected,
+    [],
+    `Unexpected products in default bank flow: [${unexpected.join(", ")}]. ` +
+    "Only transactions, auth, and identity are appropriate for depository account connections."
+  );
+});

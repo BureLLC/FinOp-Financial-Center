@@ -57,7 +57,7 @@ serve(async (req) => {
         secret: plaidSecret,
         user: { client_user_id: user.id },
         client_name: "FinOps Financial Center",
-        products: ["transactions", "investments", "liabilities"],
+        products: ["transactions"],
         country_codes: ["US"],
         language: "en",
         redirect_uri: "https://finopsfinancialcenter.vercel.app/oauth-redirect",
