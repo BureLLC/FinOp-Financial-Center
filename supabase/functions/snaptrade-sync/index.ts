@@ -57,8 +57,13 @@ interface AccountBreakdown {
   skipReason: string | null
   dbAction: "inserted" | "updated" | "error" | "skipped"
   dbError: string | null
-  positionsCount: number
-  positionsSyncStatus: "ok" | "empty" | "error" | "skipped"
+  positionsFetchAttempted: boolean
+  positionsRawCount: number       // total returned by SnapTrade API
+  positionsInsertAttempted: number
+  positionsInsertFailed: number
+  positionsCount: number          // successfully persisted
+  positionsSyncStatus: "ok" | "empty" | "error" | "skipped" | "insert_failed"
+  positionsSyncNote: string | null
 }
 
 serve(async (req) => {
@@ -284,6 +289,11 @@ serve(async (req) => {
     let positionSyncErrors = 0
     let accountSkipCount = 0
     let accountDbErrors = 0
+    let positionsFetchAttempted = 0     // accounts where positions endpoint was called
+    let totalRawPositions = 0           // sum of positions returned by SnapTrade across all accounts
+    let totalSkippedPositions = 0       // positions skipped during parsing (bad data)
+    let positionsInsertAttempted = 0    // DB insert/update attempts
+    let positionsInsertFailed = 0       // DB insert/update failures
 
     const syncedProviderAccountIds: string[] = []
     const perAccountBreakdown: AccountBreakdown[] = []
@@ -314,7 +324,9 @@ serve(async (req) => {
         perAccountBreakdown.push({
           snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
           skipped: true, skipReason: "closed_zero_balance", dbAction: "skipped", dbError: null,
-          positionsCount: 0, positionsSyncStatus: "skipped",
+          positionsFetchAttempted: false, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "skipped", positionsSyncNote: null,
         })
         accountSkipCount++
         continue
@@ -403,56 +415,133 @@ serve(async (req) => {
         perAccountBreakdown.push({
           snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
           skipped: false, skipReason: null, dbAction, dbError,
-          positionsCount: 0, positionsSyncStatus: "error",
+          positionsFetchAttempted: false, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "error", positionsSyncNote: "local_account_id_unresolvable",
         })
         continue
       }
       const financialAccountId = resolvedAccount.id
 
-      // ── Positions for this account ────────────────────────────────────────
+      // ── Positions for this account ─────────────────────────────────────────
+      console.log(`[snaptrade-sync] Positions fetch | snapAcctId: ${acctId} | localAcctId: ${financialAccountId}`)
+      positionsFetchAttempted++
+
       const posResult = await snapTradeGetPositions(clientId, consumerKey, acctId, {
         userId: snapTradeUserId, userSecret,
       })
 
       if (!posResult.ok) {
-        console.error(`[snaptrade-sync] Position fetch failed | snapId: ${acctId} | HTTP: ${posResult.status}`)
+        const posErrBody = JSON.stringify(posResult.data)?.substring(0, 300) ?? "null"
+        console.error(`[snaptrade-sync] Position fetch failed | snapAcctId: ${acctId} | HTTP: ${posResult.status} | body: ${posErrBody}`)
         positionSyncErrors++
         perAccountBreakdown.push({
           snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
           skipped: false, skipReason: null, dbAction, dbError,
-          positionsCount: 0, positionsSyncStatus: "error",
+          positionsFetchAttempted: true, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "error", positionsSyncNote: `http_${posResult.status}`,
         })
         continue
       }
 
-      const positions = Array.isArray(posResult.data) ? posResult.data : []
-      console.log(`[snaptrade-sync] Positions for account ${acctId}: ${positions.length}`)
+      // Normalize positions response: SnapTrade may return a raw array or an object wrapping positions.
+      // Do NOT silently treat unknown shapes as true-zero — log them as errors.
+      let positions: unknown[]
+      let positionsResponseNote: string | null = null
+
+      if (Array.isArray(posResult.data)) {
+        // Canonical case: raw array of positions
+        positions = posResult.data
+      } else if (
+        posResult.data !== null &&
+        typeof posResult.data === "object" &&
+        Array.isArray((posResult.data as Record<string, unknown>).positions)
+      ) {
+        // Wrapped case: { positions: [...], ... }
+        positions = (posResult.data as Record<string, unknown>).positions as unknown[]
+        positionsResponseNote = "wrapped_positions_object"
+        console.warn(`[snaptrade-sync] Positions response wrapped in object | snapAcctId: ${acctId} | keys: [${Object.keys(posResult.data as Record<string, unknown>).join(", ")}] | extracted ${positions.length} positions`)
+      } else if (
+        posResult.data !== null &&
+        typeof posResult.data === "object" &&
+        (
+          (posResult.data as Record<string, unknown>).code !== undefined ||
+          (posResult.data as Record<string, unknown>).message !== undefined
+        )
+      ) {
+        // Error object shape: { code: "...", message: "..." }
+        const errPreview = JSON.stringify(posResult.data)?.substring(0, 200) ?? "null"
+        console.error(`[snaptrade-sync] Positions response is an error object | snapAcctId: ${acctId} | body: ${errPreview}`)
+        positionSyncErrors++
+        perAccountBreakdown.push({
+          snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
+          skipped: false, skipReason: null, dbAction, dbError,
+          positionsFetchAttempted: true, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "error", positionsSyncNote: "api_returned_error_object",
+        })
+        continue
+      } else {
+        // Unrecognized shape — log and treat as fetch failure, not true zero
+        const typeDesc = posResult.data === null ? "null" : typeof posResult.data
+        const preview = JSON.stringify(posResult.data)?.substring(0, 200) ?? "null"
+        console.error(`[snaptrade-sync] Positions response is unrecognized shape | snapAcctId: ${acctId} | type: ${typeDesc} | preview: ${preview}`)
+        positionSyncErrors++
+        perAccountBreakdown.push({
+          snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
+          skipped: false, skipReason: null, dbAction, dbError,
+          positionsFetchAttempted: true, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "error", positionsSyncNote: `unrecognized_response_${typeDesc}`,
+        })
+        continue
+      }
+
+      const rawCount = positions.length
+      totalRawPositions += rawCount
+
+      if (rawCount === 0) {
+        console.log(`[snaptrade-sync] Positions true-zero | snapAcctId: ${acctId} | SnapTrade confirmed empty array for this account`)
+        accountsMissingPositions++
+        perAccountBreakdown.push({
+          snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
+          skipped: false, skipReason: null, dbAction, dbError,
+          positionsFetchAttempted: true, positionsRawCount: 0,
+          positionsInsertAttempted: 0, positionsInsertFailed: 0,
+          positionsCount: 0, positionsSyncStatus: "empty", positionsSyncNote: positionsResponseNote,
+        })
+        continue
+      }
 
       // Log first position shape to verify parser matches actual SnapTrade response
-      if (positions.length > 0) {
-        const firstPos = positions[0] as Record<string, unknown>
-        const symObj = firstPos?.symbol as Record<string, unknown> | undefined
-        console.log(`[snaptrade-sync] First position keys: [${Object.keys(firstPos).join(", ")}]`)
-        console.log(`[snaptrade-sync] First position.symbol keys: [${symObj ? Object.keys(symObj).join(", ") : "n/a"}]`)
-        console.log(`[snaptrade-sync] Field check: units=${firstPos?.units !== undefined} | price=${firstPos?.price !== undefined} | average_purchase_price=${firstPos?.average_purchase_price !== undefined} | open_pnl=${firstPos?.open_pnl !== undefined} | market_value=${firstPos?.market_value !== undefined}`)
-      }
+      const firstPos = positions[0] as Record<string, unknown>
+      const symObjFirst = firstPos?.symbol as Record<string, unknown> | undefined
+      console.log(`[snaptrade-sync] First position keys: [${Object.keys(firstPos).join(", ")}]`)
+      console.log(`[snaptrade-sync] First position.symbol keys: [${symObjFirst ? Object.keys(symObjFirst).join(", ") : "n/a"}]`)
+      console.log(`[snaptrade-sync] Field check: units=${firstPos?.units !== undefined} | price=${firstPos?.price !== undefined} | average_purchase_price=${firstPos?.average_purchase_price !== undefined} | open_pnl=${firstPos?.open_pnl !== undefined} | market_value=${firstPos?.market_value !== undefined}`)
 
-      if (positions.length === 0) {
-        accountsMissingPositions++
-      } else {
-        accountsWithPositions++
-      }
+      accountsWithPositions++
 
       const syncedSymbols: string[] = []
       let positionsForThisAccount = 0
+      let acctInsertAttempted = 0
+      let acctInsertFailed = 0
 
       for (const pos of positions) {
         const p = pos as Record<string, unknown>
         const symbolObj = p?.symbol as Record<string, unknown>
-        const symbol = symbolObj?.symbol as string ?? "UNKNOWN"
-        const description = symbolObj?.description as string ?? symbol
+        const symbol = (symbolObj?.symbol as string | undefined) ?? ""
+        if (!symbol) {
+          totalSkippedPositions++
+          const symbolPreview = JSON.stringify(p?.symbol)?.substring(0, 100) ?? "null"
+          console.warn(`[snaptrade-sync] Position skipped | snapAcctId: ${acctId} | reason: symbol_field_missing | raw_symbol: ${symbolPreview}`)
+          continue
+        }
+
+        const description = (symbolObj?.description as string | undefined) ?? symbol
         // Derive asset_type from SnapTrade symbol type code; normalize mutual_fund → etf
-        const rawTypeCode = ((symbolObj?.type as Record<string, unknown>)?.code as string ?? "equity").toLowerCase()
+        const rawTypeCode = ((symbolObj?.type as Record<string, unknown>)?.code as string | undefined ?? "equity").toLowerCase()
         const assetType = rawTypeCode === "mutual_fund" ? "etf" : rawTypeCode
         const quantity = (p?.units as number) ?? 0
         const price = (p?.price as number) ?? 0
@@ -462,16 +551,31 @@ serve(async (req) => {
         const marketValue = (p?.market_value as number) ?? (quantity * price)
         const unrealizedGain = marketValue - bookValue
 
-        syncedSymbols.push(symbol)
-        console.log(`[snaptrade-sync] Position | symbol: ${symbol} | qty: ${quantity} | price: ${price} | mktVal: ${marketValue}`)
+        // Normalize currency: guard against object value (e.g. {code:"USD"}) from SnapTrade symbol
+        const symbolCurrency = (symbolObj?.currency as Record<string, unknown>)?.code as string | undefined
+        const positionCurrency = (symbolCurrency ?? currency).substring(0, 3)
 
-        const { data: existingPos } = await supabase
+        syncedSymbols.push(symbol)
+        console.log(`[snaptrade-sync] Position | symbol: ${symbol} | qty: ${quantity} | price: ${price} | mktVal: ${marketValue} | assetType: ${assetType} | currency: ${positionCurrency}`)
+
+        // Look up only active (non-deleted) positions to prevent soft-deleted rows
+        // from causing silent errors or duplicate active rows on upsert.
+        const { data: existingPos, error: lookupErr } = await supabase
           .from("positions")
           .select("id")
           .eq("user_id", user.id)
           .eq("financial_account_id", financialAccountId)
           .eq("asset_symbol", symbol)
+          .is("deleted_at", null)
           .maybeSingle()
+
+        if (lookupErr) {
+          console.error(`[snaptrade-sync] Position lookup error | table: positions | symbol: ${symbol} | snapAcctId: ${acctId} | code: ${lookupErr.code} | error: ${lookupErr.message} | hint: ${lookupErr.hint ?? "none"} | details: ${lookupErr.details ?? "none"}`)
+          totalSkippedPositions++
+          acctInsertFailed++
+          positionsInsertFailed++
+          continue
+        }
 
         const posRecord = {
           user_id: user.id,
@@ -479,7 +583,7 @@ serve(async (req) => {
           asset_symbol: symbol,
           asset_name: description,
           asset_type: assetType,
-          currency: currency.substring(0, 3),
+          currency: positionCurrency,
           calculated_quantity: quantity,
           average_cost_basis: avgPurchasePrice,
           total_cost_basis: bookValue,
@@ -492,18 +596,28 @@ serve(async (req) => {
           updated_at: new Date().toISOString(),
         }
 
+        acctInsertAttempted++
+        positionsInsertAttempted++
+
         if (existingPos) {
-          const { error: posUpdateErr } = await supabase.from("positions").update({ ...posRecord, deleted_at: null }).eq("id", existingPos.id)
+          const { error: posUpdateErr } = await supabase.from("positions")
+            .update({ ...posRecord, deleted_at: null })
+            .eq("id", existingPos.id)
           if (posUpdateErr) {
-            console.error(`[snaptrade-sync] Position update failed | symbol: ${symbol} | error:`, posUpdateErr.message)
+            console.error(`[snaptrade-sync] Position update failed | table: positions | symbol: ${symbol} | snapAcctId: ${acctId} | code: ${posUpdateErr.code} | error: ${posUpdateErr.message} | hint: ${posUpdateErr.hint ?? "none"} | details: ${posUpdateErr.details ?? "none"}`)
+            acctInsertFailed++
+            positionsInsertFailed++
           } else {
             totalPositionsSynced++
             positionsForThisAccount++
           }
         } else {
-          const { error: posInsertErr } = await supabase.from("positions").insert({ ...posRecord, created_at: new Date().toISOString() })
+          const { error: posInsertErr } = await supabase.from("positions")
+            .insert({ ...posRecord, created_at: new Date().toISOString() })
           if (posInsertErr) {
-            console.error(`[snaptrade-sync] Position insert failed | symbol: ${symbol} | error:`, posInsertErr.message)
+            console.error(`[snaptrade-sync] Position insert failed | table: positions | symbol: ${symbol} | snapAcctId: ${acctId} | code: ${posInsertErr.code} | error: ${posInsertErr.message} | hint: ${posInsertErr.hint ?? "none"} | details: ${posInsertErr.details ?? "none"}`)
+            acctInsertFailed++
+            positionsInsertFailed++
           } else {
             totalPositionsSynced++
             positionsForThisAccount++
@@ -512,7 +626,7 @@ serve(async (req) => {
       }
 
       // Soft-delete positions no longer returned by SnapTrade for this account
-      // (e.g. sold positions). Only run when we have a confirmed position list.
+      // (e.g. sold positions). Only runs when we have a confirmed non-empty position list.
       if (syncedSymbols.length > 0) {
         const { error: stalePosDel } = await supabase
           .from("positions")
@@ -522,15 +636,26 @@ serve(async (req) => {
           .is("deleted_at", null)
           .not("asset_symbol", "in", `(${syncedSymbols.join(",")})`)
         if (stalePosDel) {
-          console.warn(`[snaptrade-sync] Stale position cleanup error | account: ${acctId}:`, stalePosDel.message)
+          console.warn(`[snaptrade-sync] Stale position cleanup error | snapAcctId: ${acctId} | code: ${stalePosDel.code} | error: ${stalePosDel.message}`)
         }
       }
+
+      const acctPosSyncStatus: AccountBreakdown["positionsSyncStatus"] =
+        acctInsertFailed > 0 && positionsForThisAccount === 0 ? "insert_failed"
+        : acctInsertFailed > 0 ? "ok"  // partial success still ok
+        : positionsForThisAccount > 0 ? "ok"
+        : "empty"
 
       perAccountBreakdown.push({
         snaptradeAccountId: acctId, name: acctName, type: rawType, mask, balance: currentBalance,
         skipped: false, skipReason: null, dbAction, dbError,
+        positionsFetchAttempted: true,
+        positionsRawCount: rawCount,
+        positionsInsertAttempted: acctInsertAttempted,
+        positionsInsertFailed: acctInsertFailed,
         positionsCount: positionsForThisAccount,
-        positionsSyncStatus: posResult.ok ? (positions.length > 0 ? "ok" : "empty") : "error",
+        positionsSyncStatus: acctPosSyncStatus,
+        positionsSyncNote: positionsResponseNote,
       })
     }
 
@@ -570,6 +695,11 @@ serve(async (req) => {
       accounts_synced: totalAccountsSynced,
       accounts_skipped: accountSkipCount,
       accounts_db_errors: accountDbErrors,
+      positions_fetch_attempted: positionsFetchAttempted,
+      positions_raw_total: totalRawPositions,
+      positions_skipped: totalSkippedPositions,
+      positions_insert_attempted: positionsInsertAttempted,
+      positions_insert_failed: positionsInsertFailed,
       positions_synced: totalPositionsSynced,
       accounts_with_positions: accountsWithPositions,
       accounts_missing_positions: accountsMissingPositions,
@@ -603,6 +733,11 @@ serve(async (req) => {
       accountsSynced: totalAccountsSynced,
       accountsSkipped: accountSkipCount,
       accountsDbErrors: accountDbErrors,
+      positionsFetchAttempted,
+      positionsRawTotal: totalRawPositions,
+      positionsSkipped: totalSkippedPositions,
+      positionsInsertAttempted,
+      positionsInsertFailed,
       positionsSynced: totalPositionsSynced,
       accountsWithPositions,
       accountsMissingPositions,

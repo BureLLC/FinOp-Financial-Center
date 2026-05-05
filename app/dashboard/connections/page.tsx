@@ -305,13 +305,27 @@ export default function ConnectionsPage() {
           const accountsReturned = data?.accountsReturned as number | undefined;
           const accountsSynced = data?.accountsSynced as number | undefined;
           const dbErrors = data?.accountsDbErrors as number | undefined;
+          const positionsSynced = data?.positionsSynced as number | undefined;
+          const positionSyncErrors = data?.positionSyncErrors as number | undefined;
+          const accountsMissingPositions = data?.accountsMissingPositions as number | undefined;
+          const positionsInsertFailed = data?.positionsInsertFailed as number | undefined;
 
           if (syncStatus === "connected_no_accounts_returned" || accountsReturned === 0) {
             setSyncMessage("⚠ SnapTrade returned 0 accounts. Check brokerage connection in portal.");
           } else if (dbErrors && dbErrors > 0 && accountsSynced === 0) {
             setSyncMessage(`Sync failed: ${dbErrors} account(s) could not be saved. Check Supabase logs.`);
           } else if (accountsSynced !== undefined && accountsSynced > 0) {
-            setSyncMessage(`Synced ${accountsSynced} account(s). Refreshing...`);
+            if (positionsSynced && positionsSynced > 0) {
+              setSyncMessage(`Synced ${accountsSynced} account(s), ${positionsSynced} position(s). Refreshing...`);
+            } else if (positionSyncErrors && positionSyncErrors > 0) {
+              setSyncMessage(`Synced ${accountsSynced} account(s), but positions sync failed. Check logs.`);
+            } else if (positionsInsertFailed && positionsInsertFailed > 0) {
+              setSyncMessage(`Synced ${accountsSynced} account(s), but some positions failed to save. Check logs.`);
+            } else if (accountsMissingPositions && accountsMissingPositions > 0) {
+              setSyncMessage(`Synced ${accountsSynced} account(s), but positions are missing — using balance fallback.`);
+            } else {
+              setSyncMessage(`Synced ${accountsSynced} account(s). Refreshing...`);
+            }
           } else {
             setSyncMessage("Sync started. Refreshing in a moment...");
           }
