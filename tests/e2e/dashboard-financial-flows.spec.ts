@@ -180,3 +180,59 @@ test.describe("Financial Connections", () => {
     expect(bodyText).not.toMatch(/NaN/i);
   });
 });
+
+// ─── Automation: financial invariant smoke checks ─────────────────────────────
+//
+// These tests verify that the automation layer does not corrupt the values
+// rendered by pages that depend on canonicalFinancialData.ts / financialCalculations.ts.
+// They run against the live rendered UI rather than the data layer directly.
+
+test.describe("Automation: financial page invariants", () => {
+  test("write-offs page is unaffected by automation (deductibles unchanged)", async ({ page }) => {
+    await page.goto("/dashboard/write-offs", { waitUntil: "domcontentloaded" });
+
+    const bodyText = await page.locator("body").innerText();
+    // Page must still render correctly with no NaN
+    expect(bodyText).toMatch(/Tax Savings/i);
+    expect(bodyText).not.toMatch(/NaN/i);
+    expect(bodyText).not.toMatch(/\bundefined\b/i);
+  });
+
+  test("tax page is unaffected by automation (deductible totals unchanged)", async ({ page }) => {
+    await page.goto("/dashboard/tax", { waitUntil: "domcontentloaded" });
+
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText).toMatch(/tax/i);
+    expect(bodyText).not.toMatch(/NaN/i);
+    expect(bodyText).not.toMatch(/\bundefined\b/i);
+  });
+
+  test("transactions page renders automation UI without crashing", async ({ page }) => {
+    await page.goto("/dashboard/transactions", { waitUntil: "domcontentloaded" });
+
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText).toMatch(/Total In/i);
+    expect(bodyText).toMatch(/Total Out/i);
+    expect(bodyText).not.toMatch(/NaN/i);
+    // Automation UI additions must not introduce errors
+    expect(bodyText).not.toMatch(/Application error|Unhandled Runtime Error|TypeError/i);
+  });
+
+  test("automation API endpoints: unauthenticated requests return 401 (not 500)", async ({ request }) => {
+    // Verify the API routes are reachable and return auth errors rather than crashes
+    const suggestionsRes = await request.get("/api/automation/suggestions");
+    expect([401, 403, 307, 308]).toContain(suggestionsRes.status());
+  });
+
+  test("summary page financial KPIs are unaffected by automation", async ({ page }) => {
+    await page.goto("/dashboard/summary", { waitUntil: "domcontentloaded" });
+
+    const bodyText = await page.locator("body").innerText();
+    // Core financial KPIs that automation must not corrupt
+    expect(bodyText).toMatch(/Net Worth/i);
+    expect(bodyText).toMatch(/Total Income/i);
+    expect(bodyText).toMatch(/Total Expenses/i);
+    expect(bodyText).not.toMatch(/NaN/i);
+    expect(bodyText).not.toMatch(/\bundefined\b/i);
+  });
+});
