@@ -57,8 +57,6 @@ export const MIXED_USE_CATEGORIES: ReadonlySet<string> = new Set([
 ]);
 
 // Controls whether business expense suggestion generation is active.
-// Phase 4 PR A: defaults to false — mark-business writes is_business_candidate
-// and creates an audit log entry, but does not create automation rules or
-// generate suggestions for similar transactions.
-// Set to true only when the Phase 4 PR B UI is merged and tested.
-export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false;
+// Phase 4 PR C: enabled — mark-business now creates/strengthens automation rules
+// and generates business_expense_candidate suggestions for similar debit transactions.
+export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createRouteClient } from "../../../../../../src/lib/automation/serverSupabase";
 import { BUSINESS_EXPENSE_SUGGESTIONS_ENABLED } from "../../../../../../src/lib/automation/constants";
+import { createOrStrengthenBusinessRule } from "../../../../../../src/lib/automation/businessRuleBuilder";
+import { generateAndStoreBusinessSuggestions } from "../../../../../../src/lib/automation/businessSuggestionEngine";
 
 // Writes only: transactions.is_business_candidate
 // Never writes: category, subcategory, income_subtype, direction, amount,
@@ -17,11 +19,10 @@ export async function POST(
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   // Verify transaction ownership through financial_accounts join.
-  // transactions do not have a direct user_id column — ownership must be
-  // established through the account relationship.
+  // Also fetch merchant_name, description, direction, category for rule creation.
   const { data: txRow } = await supabase
     .from("transactions")
-    .select("id, is_business_candidate, financial_accounts!inner(user_id)")
+    .select("id, is_business_candidate, merchant_name, description, direction, category, financial_accounts!inner(user_id)")
     .eq("id", transactionId)
     .single();
 
@@ -63,19 +64,35 @@ export async function POST(
     .single();
 
   if (auditError) {
-    // Audit log failure is non-blocking for the write, but log it and omit auditId
-    // so the client knows undo will not be available for this action.
+    // Audit log failure is non-blocking for the write, but omit auditId so the
+    // client knows undo will not be available for this action.
     return NextResponse.json({ success: true, auditId: null, suggestionsEnabled: false, suggestionsCreated: 0 });
   }
 
+  // Create or strengthen a business candidate rule from this user action.
+  // Rule learning is not gated by BUSINESS_EXPENSE_SUGGESTIONS_ENABLED — the system
+  // learns from every explicit user mark so that rules are already present when the
+  // flag is enabled.
+  const merchantName = (txRow as { merchant_name: string | null }).merchant_name ?? null;
+  const description = (txRow as { description: string | null }).description ?? null;
+  const direction = (txRow as { direction: string }).direction ?? "debit";
+  const category = (txRow as { category: string | null }).category ?? null;
+
+  const { rule } = await createOrStrengthenBusinessRule(
+    { userId, transactionId, merchantName, description, direction, category },
+    supabase,
+  );
+
   // Suggestion generation is gated by feature flag.
-  // Phase 4 PR A: BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false.
-  // When false: no automation rule is created and no suggestions are generated.
-  // When true (Phase 4 PR B): rule creation and suggestion generation will be added here.
+  let suggestionsCreated = 0;
+  if (BUSINESS_EXPENSE_SUGGESTIONS_ENABLED && rule) {
+    suggestionsCreated = await generateAndStoreBusinessSuggestions(rule, transactionId, supabase);
+  }
+
   return NextResponse.json({
     success: true,
     auditId: auditRow?.id ?? null,
     suggestionsEnabled: BUSINESS_EXPENSE_SUGGESTIONS_ENABLED,
-    suggestionsCreated: 0,
+    suggestionsCreated,
   });
 }

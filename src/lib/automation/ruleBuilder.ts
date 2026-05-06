@@ -53,12 +53,14 @@ export async function createOrStrengthenRule(
   const actionConfig: { category: string; subcategory?: string } = { category: normalizedCategory };
   if (subcategory) actionConfig.subcategory = subcategory;
 
-  // Check for an existing active rule with the same matcher + action for this user
+  // Check for an existing active category rule with the same matcher + action for this user.
+  // Explicitly filter action_type to exclude business candidate rules (mark_business_candidate).
   const { data: existing } = await supabase
     .from("automation_rules")
     .select("*")
     .eq("user_id", userId)
     .eq("rule_type", "transaction_category")
+    .eq("action_type", "set_category")
     .eq("matcher_type", matcherType)
     .eq("status", "active")
     .neq("deleted_at", null)
@@ -67,7 +69,7 @@ export async function createOrStrengthenRule(
 
   // Find a rule whose matcher_config and action_config match meaningfully
   const match = (existing ?? []).find((r: AutomationRule) => {
-    if (r.action_config.category !== normalizedCategory) return false;
+    if ((r.action_config as { category?: string }).category !== normalizedCategory) return false;
     if (matcherType === "merchant_normalized") {
       return (r.matcher_config as MerchantNormalizedMatcher).normalized_merchant === normalizedMerchant;
     }

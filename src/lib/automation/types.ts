@@ -39,8 +39,8 @@ export interface AutomationRule {
   rule_type: Phase1RuleType;
   matcher_type: Phase1MatcherType;
   matcher_config: Phase1MatcherConfig;
-  action_type: Phase1ActionType;
-  action_config: Phase1ActionConfig;
+  action_type: Phase4ActionType;
+  action_config: Phase1ActionConfig | BusinessExpenseActionConfig;
   confidence: number;
   status: RuleStatus;
   requires_confirmation: boolean;
