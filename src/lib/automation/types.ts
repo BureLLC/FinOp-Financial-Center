@@ -58,10 +58,10 @@ export interface AutomationSuggestion {
   id: string;
   user_id: string;
   automation_rule_id: string | null;
-  suggestion_type: Phase1RuleType;
+  suggestion_type: Phase4SuggestionType;
   source_entity_type: 'transaction';
   source_entity_id: string;
-  suggested_action: Phase1ActionConfig & { reason: string };
+  suggested_action: (Phase1ActionConfig & { reason: string }) | BusinessExpenseActionConfig;
   reason: string | null;
   confidence: number;
   status: Phase1SuggestionStatus;
