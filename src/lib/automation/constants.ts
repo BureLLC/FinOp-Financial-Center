@@ -67,3 +67,10 @@ export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
 // generateAndStoreWriteOffSuggestions when a rule is learned.
 // Rollback: set to false to disable generation and dormant the UI suggestion panel.
 export const WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED = true;
+
+// Controls whether budget automation is active.
+// Budget Automation PR A: false — tables and services exist but no generation is wired
+// into user-facing routes and the UI is not modified.
+// Flip to true in Budget Automation PR B after generation, accept/reject, and UI are complete.
+// Rollback: set to false and redeploy. No migration needed.
+export const BUDGET_AUTOMATION_ENABLED = false;
