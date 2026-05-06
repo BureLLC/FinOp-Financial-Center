@@ -41,6 +41,7 @@ function matcherDetail(rule: AutomationRule): string {
 
 function actionSummary(rule: AutomationRule): string {
   if (rule.action_type === "mark_business_candidate") return "Mark as Business Candidate";
+  if (rule.action_type === "mark_writeoff_candidate") return "Mark as Write-Off Candidate";
   const catConfig = rule.action_config as { category?: string; subcategory?: string };
   const c = catConfig.category ?? "—";
   return catConfig.subcategory ? `${c} › ${catConfig.subcategory}` : c;

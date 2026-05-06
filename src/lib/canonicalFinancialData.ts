@@ -208,6 +208,7 @@ export async function getCanonicalTransactions(
         `id, user_id, financial_account_id, direction, amount, status, deleted_at,
         external_transaction_id, provider, transaction_date, merchant_name, description,
         transaction_type, income_subtype, category, subcategory, currency,
+        is_business_candidate, is_writeoff_candidate,
         financial_accounts!inner(id, is_active, deleted_at)`
       )
       .eq("user_id", userId)

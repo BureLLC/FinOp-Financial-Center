@@ -22,15 +22,59 @@ export async function POST(
 
   if (!auditEntry) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // ─── Branch: write-off candidate undo — not yet implemented (PR A placeholder) ─
-  // The full undo path for mark_writeoff_candidate is added in PR B alongside the
-  // write path. The stale-value guard and revert logic follow the same pattern as
-  // mark_business_candidate but operate on is_writeoff_candidate.
+  // ─── Branch: write-off candidate undo ────────────────────────────────────────
   if (auditEntry.action_taken === "mark_writeoff_candidate") {
-    return NextResponse.json(
-      { error: "mark_writeoff_candidate undo is not yet implemented" },
-      { status: 501 },
-    );
+    // Stale-value guard: verify is_writeoff_candidate still matches what automation wrote.
+    // If the transaction was modified since the mark-writeoff action, undo is blocked.
+    const { data: txRow } = await supabase
+      .from("transactions")
+      .select("is_writeoff_candidate")
+      .eq("id", auditEntry.entity_id as string)
+      .single();
+
+    const newValue = auditEntry.new_value as Record<string, unknown> | null;
+    const expectedValue = newValue?.is_writeoff_candidate ?? true;
+    const currentValue = (txRow as { is_writeoff_candidate: boolean | null } | null)?.is_writeoff_candidate ?? null;
+
+    if (currentValue !== expectedValue) {
+      return NextResponse.json(
+        { success: false, reason: "transaction_edited_after_apply" },
+        { status: 409 },
+      );
+    }
+
+    // Revert: set is_writeoff_candidate back to NULL (the pre-mark state)
+    const { error: revertError } = await supabase
+      .from("transactions")
+      .update({ is_writeoff_candidate: null })
+      .eq("id", auditEntry.entity_id as string);
+
+    if (revertError) return NextResponse.json({ error: revertError.message }, { status: 500 });
+
+    // Revert suggestion status to 'pending' so the suggestion can be acted on again
+    if (auditEntry.suggestion_id) {
+      await supabase
+        .from("automation_suggestions")
+        .update({ status: "pending", resolved_at: null, resolved_by: null })
+        .eq("id", auditEntry.suggestion_id as string)
+        .eq("user_id", userId);
+    }
+
+    // Append-only audit log entry for the undo
+    await supabase.from("automation_audit_log").insert({
+      user_id: userId,
+      automation_rule_id: (auditEntry.automation_rule_id as string | null) ?? null,
+      suggestion_id: (auditEntry.suggestion_id as string | null) ?? null,
+      entity_type: "transaction",
+      entity_id: auditEntry.entity_id as string,
+      action_taken: "undo_mark_writeoff_candidate",
+      previous_value: { is_writeoff_candidate: true },
+      new_value: { is_writeoff_candidate: null },
+      confidence: null,
+      triggered_by: "user_undo",
+    });
+
+    return NextResponse.json({ success: true });
   }
 
   // ─── Branch: business expense candidate undo ──────────────────────────────────
