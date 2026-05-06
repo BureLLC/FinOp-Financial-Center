@@ -18,21 +18,58 @@
 --   - Does NOT modify balances, amounts, or any financial fields.
 --   - Only writes deleted_at = NULL and updated_at = now() on qualifying rows.
 --   - Idempotent: safe to re-run.
+--   - Guarded: skips silently if required tables do not yet exist (shadow DB).
 --
 -- Rollback:
 --   There is no safe automated rollback. The prior deleted_at values are not
 --   preserved. If reverting is needed, run a delete on integration_connections
 --   and re-sync.
 
-UPDATE public.financial_accounts fa
-SET
-  deleted_at = NULL,
-  updated_at = now()
-WHERE fa.is_active = true
-  AND fa.deleted_at IS NOT NULL
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'financial_accounts'
+  )
   AND EXISTS (
     SELECT 1
-    FROM public.integration_connections ic
-    WHERE ic.id  = fa.integration_connection_id
-      AND ic.status = 'active'
-  );
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'integration_connections'
+  )
+  THEN
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'financial_accounts'
+        AND column_name = 'updated_at'
+    )
+    THEN
+      EXECUTE $sql$
+        UPDATE public.financial_accounts fa
+        SET deleted_at = NULL,
+            updated_at = now()
+        FROM public.integration_connections ic
+        WHERE fa.integration_connection_id = ic.id
+          AND fa.is_active = true
+          AND fa.deleted_at IS NOT NULL
+          AND ic.status = 'active'
+      $sql$;
+    ELSE
+      EXECUTE $sql$
+        UPDATE public.financial_accounts fa
+        SET deleted_at = NULL
+        FROM public.integration_connections ic
+        WHERE fa.integration_connection_id = ic.id
+          AND fa.is_active = true
+          AND fa.deleted_at IS NOT NULL
+          AND ic.status = 'active'
+      $sql$;
+    END IF;
+  ELSE
+    RAISE NOTICE 'Skipping financial_accounts deleted_at repair: required tables not present';
+  END IF;
+END $$;
