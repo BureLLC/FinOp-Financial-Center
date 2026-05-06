@@ -22,6 +22,17 @@ export async function POST(
 
   if (!auditEntry) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  // ─── Branch: write-off candidate undo — not yet implemented (PR A placeholder) ─
+  // The full undo path for mark_writeoff_candidate is added in PR B alongside the
+  // write path. The stale-value guard and revert logic follow the same pattern as
+  // mark_business_candidate but operate on is_writeoff_candidate.
+  if (auditEntry.action_taken === "mark_writeoff_candidate") {
+    return NextResponse.json(
+      { error: "mark_writeoff_candidate undo is not yet implemented" },
+      { status: 501 },
+    );
+  }
+
   // ─── Branch: business expense candidate undo ──────────────────────────────────
   if (auditEntry.action_taken === "mark_business_candidate") {
     // Stale-value guard: verify is_business_candidate still matches what automation wrote.

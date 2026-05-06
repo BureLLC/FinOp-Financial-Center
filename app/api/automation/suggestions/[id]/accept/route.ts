@@ -21,6 +21,15 @@ export async function POST(
 
   if (!suggestion) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  // ─── Branch: write-off candidate — not yet implemented (PR A placeholder) ────
+  // The apply_writeoff_candidate_suggestion RPC and full accept path are added in PR B.
+  if (suggestion.suggestion_type === "write_off_candidate") {
+    return NextResponse.json(
+      { error: "write_off_candidate accept is not yet implemented" },
+      { status: 501 },
+    );
+  }
+
   // ─── Branch: business expense candidate ──────────────────────────────────────
   if (suggestion.suggestion_type === "business_expense_candidate") {
     if (suggestion.status !== "pending") {
