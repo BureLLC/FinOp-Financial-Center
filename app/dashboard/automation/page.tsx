@@ -40,8 +40,10 @@ function matcherDetail(rule: AutomationRule): string {
 }
 
 function actionSummary(rule: AutomationRule): string {
-  const c = rule.action_config.category ?? "—";
-  return rule.action_config.subcategory ? `${c} › ${rule.action_config.subcategory}` : c;
+  if (rule.action_type === "mark_business_candidate") return "Mark as Business Candidate";
+  const catConfig = rule.action_config as { category?: string; subcategory?: string };
+  const c = catConfig.category ?? "—";
+  return catConfig.subcategory ? `${c} › ${catConfig.subcategory}` : c;
 }
 
 function confidenceTier(c: number): { label: string; color: string } {

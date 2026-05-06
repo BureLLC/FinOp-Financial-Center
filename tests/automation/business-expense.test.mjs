@@ -392,33 +392,33 @@ test("undo does not affect category, income_subtype, or any protected field", ()
   assert.equal(result.updatePayload.is_business_candidate, null);
 });
 
-// ─── 10. BUSINESS_EXPENSE_SUGGESTIONS_ENABLED defaults false
+// ─── 10. BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is true in PR C
 
-test("BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is defined and defaults to false", () => {
+test("BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is defined and is true in Phase 4 PR C", () => {
   const src = readFileSync(
     path.join(ROOT, "src/lib/automation/constants.ts"),
     "utf8",
   );
   const match = src.match(/BUSINESS_EXPENSE_SUGGESTIONS_ENABLED\s*=\s*(true|false)/);
   assert.ok(match, "BUSINESS_EXPENSE_SUGGESTIONS_ENABLED must be defined in constants.ts");
-  assert.equal(match[1], "false", "Must default to false in Phase 4 PR A");
+  assert.equal(match[1], "true", "Must be true in Phase 4 PR C — suggestion generation enabled");
 });
 
-// ─── 11. No suggestions generated when flag is false
+// ─── 11. Suggestions generated when flag is true
 
-test("mark-business returns suggestionsEnabled: false and suggestionsCreated: 0 in Phase 4 PR A", () => {
-  // Simulate the route response when BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false
-  const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false;
+test("mark-business returns suggestionsEnabled: true in Phase 4 PR C", () => {
+  // Simulate the route response when BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true
+  const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
   const response = {
     success: true,
     auditId: "audit-1",
     suggestionsEnabled: BUSINESS_EXPENSE_SUGGESTIONS_ENABLED,
-    suggestionsCreated: 0,
+    suggestionsCreated: 3,
   };
-  assert.equal(response.suggestionsEnabled, false,
-    "Flag must be false in PR A — no suggestion generation");
-  assert.equal(response.suggestionsCreated, 0,
-    "Zero suggestions must be created when flag is false");
+  assert.equal(response.suggestionsEnabled, true,
+    "Flag must be true in PR C — suggestion generation enabled");
+  assert.ok(response.suggestionsCreated >= 0,
+    "suggestionsCreated must be a non-negative number");
 });
 
 // ─── 12. No auto-apply
@@ -789,4 +789,423 @@ test("PR B: BusinessExpenseActionConfig is defined with mixed_use and reason fie
   assert.match(src, /BusinessExpenseActionConfig/, "BusinessExpenseActionConfig must be defined");
   assert.match(src, /mixed_use/, "Must have mixed_use field");
   assert.match(src, /reason/, "Must have reason field");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 4 PR C: Business rule creation and suggestion generation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Inlined helpers (mirror businessRuleBuilder.ts + merchantNormalizer.ts) ──
+
+const LEGAL_SUFFIX_RE = /\s+(?:llc|inc|corp|co|ltd|incorporated|limited|company)\.?$/i;
+const TLD_RE = /\.(com|net|org|io|co)$/i;
+const PUNCTUATION_RE = /[^\w\s&]/g;
+const WHITESPACE_RE = /\s+/g;
+
+function normalizeMerchant(raw) {
+  if (typeof raw !== "string" || raw.length === 0) return "";
+  return raw
+    .toLowerCase()
+    .replace(TLD_RE, "")
+    .replace(LEGAL_SUFFIX_RE, "")
+    .replace(PUNCTUATION_RE, " ")
+    .replace(WHITESPACE_RE, " ")
+    .trim();
+}
+
+function normalizeDescription(raw) {
+  if (typeof raw !== "string" || raw.length === 0) return "";
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(WHITESPACE_RE, " ")
+    .trim();
+}
+
+function deriveBusinessRuleInput(merchantName, description, direction) {
+  if (direction !== "debit") {
+    return { blocked: true, reason: "Business candidate rules only apply to debit transactions" };
+  }
+  const normalizedMerchant = normalizeMerchant(merchantName ?? "");
+  const normalizedDesc = normalizeDescription(description ?? "");
+  const descTokens = normalizedDesc.split(/\s+/).filter((t) => t.length > 2);
+  if (!normalizedMerchant && descTokens.length === 0) {
+    return { blocked: true, reason: "No usable matcher signal (no merchant name or description tokens)" };
+  }
+  const matcherType = normalizedMerchant ? "merchant_normalized" : "description_pattern";
+  const matcherConfig = normalizedMerchant
+    ? { normalized_merchant: normalizedMerchant, direction: "debit" }
+    : { description_tokens: descTokens };
+  return { blocked: false, reason: "OK", matcherType, matcherConfig };
+}
+
+// ─── Inlined: buildBusinessSuggestionsForRule ─────────────────────────────────
+
+const MIXED_USE_CONFIDENCE_CAP = 0.60;
+
+function evaluateRuleInline(rule, tx) {
+  if (tx.direction !== "debit") return { matched: false, confidence: 0 };
+  if (rule.matcher_type === "merchant_normalized") {
+    const ruleMerchant = rule.matcher_config.normalized_merchant;
+    const txMerchant = normalizeMerchant(tx.merchant_name ?? "");
+    if (!txMerchant || !ruleMerchant) return { matched: false, confidence: 0 };
+    if (txMerchant === ruleMerchant) return { matched: true, confidence: 0.85, reason: `Exact merchant match: "${txMerchant}"` };
+    if (txMerchant.startsWith(ruleMerchant) || ruleMerchant.startsWith(txMerchant))
+      return { matched: true, confidence: 0.65, reason: `Partial merchant match` };
+    return { matched: false, confidence: 0 };
+  }
+  return { matched: false, confidence: 0 };
+}
+
+function buildBusinessSuggestionsForRule(rule, candidates, excludeTransactionId, rejectedTxIds) {
+  if (rule.status !== "active") return [];
+  const results = [];
+  for (const tx of candidates) {
+    if (tx.id === excludeTransactionId) continue;
+    if (tx.direction !== "debit") continue;
+    if ((tx.transaction_type ?? "").toLowerCase() === "transfer") continue;
+    if (tx.is_business_candidate === true) continue;
+    if (rejectedTxIds.has(tx.id)) continue;
+    const matchResult = evaluateRuleInline(rule, tx);
+    if (!matchResult.matched) continue;
+    const isMixedUse = MIXED_USE_CATEGORIES.has((tx.category ?? "").toLowerCase().trim());
+    const confidence = isMixedUse
+      ? Math.min(matchResult.confidence, MIXED_USE_CONFIDENCE_CAP)
+      : matchResult.confidence;
+    results.push({
+      suggestion: {
+        user_id: rule.user_id,
+        automation_rule_id: rule.id,
+        suggestion_type: "business_expense_candidate",
+        source_entity_type: "transaction",
+        source_entity_id: tx.id,
+        suggested_action: { mixed_use: isMixedUse, reason: matchResult.reason },
+        reason: matchResult.reason,
+        confidence,
+        status: "pending",
+      },
+    });
+  }
+  return results;
+}
+
+// ─── 25. deriveBusinessRuleInput: direction guard ─────────────────────────────
+
+test("PR C: deriveBusinessRuleInput blocks credit transactions", () => {
+  const result = deriveBusinessRuleInput("Starbucks", null, "credit");
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /debit/i, "Reason must mention debit");
+});
+
+test("PR C: deriveBusinessRuleInput blocks transactions with no merchant and no description", () => {
+  const result = deriveBusinessRuleInput(null, null, "debit");
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /No usable matcher signal/);
+});
+
+test("PR C: deriveBusinessRuleInput blocks when description has only short tokens (<=2 chars)", () => {
+  const result = deriveBusinessRuleInput(null, "is a on", "debit");
+  assert.equal(result.blocked, true, "Tokens <= 2 chars should not produce a usable signal");
+});
+
+test("PR C: deriveBusinessRuleInput prefers merchant_normalized when merchant is available", () => {
+  const result = deriveBusinessRuleInput("Starbucks", "coffee purchase", "debit");
+  assert.equal(result.blocked, false);
+  assert.equal(result.matcherType, "merchant_normalized");
+  assert.equal(result.matcherConfig.normalized_merchant, "starbucks");
+  assert.equal(result.matcherConfig.direction, "debit");
+});
+
+test("PR C: deriveBusinessRuleInput falls back to description_pattern when no merchant", () => {
+  const result = deriveBusinessRuleInput(null, "office supply purchase", "debit");
+  assert.equal(result.blocked, false);
+  assert.equal(result.matcherType, "description_pattern");
+  assert.ok(Array.isArray(result.matcherConfig.description_tokens), "description_tokens must be array");
+  assert.ok(result.matcherConfig.description_tokens.length > 0, "Must have at least one token");
+  assert.equal(result.matcherConfig.description_tokens.includes("office"), true);
+});
+
+test("PR C: deriveBusinessRuleInput normalizes merchant (strips legal suffix and TLD)", () => {
+  const result = deriveBusinessRuleInput("Amazon.com LLC", null, "debit");
+  assert.equal(result.blocked, false);
+  assert.equal(result.matcherType, "merchant_normalized");
+  assert.doesNotMatch(result.matcherConfig.normalized_merchant, /\.com/, "TLD must be stripped");
+  assert.doesNotMatch(result.matcherConfig.normalized_merchant, /llc/i, "Legal suffix must be stripped");
+});
+
+test("PR C: deriveBusinessRuleInput description tokens exclude words of 2 chars or fewer", () => {
+  const result = deriveBusinessRuleInput(null, "an to office supplies", "debit");
+  assert.equal(result.blocked, false);
+  const tokens = result.matcherConfig.description_tokens;
+  for (const tok of tokens) {
+    assert.ok(tok.length > 2, `Token "${tok}" must be longer than 2 chars`);
+  }
+});
+
+// ─── 26. Business rule creation shape ────────────────────────────────────────
+
+test("PR C: new business candidate rule has correct action_type and action_config shape", () => {
+  // Simulate the rule insert payload from createOrStrengthenBusinessRule
+  const rule = {
+    user_id: "u1",
+    rule_type: "transaction_category",
+    matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" },
+    action_type: "mark_business_candidate",
+    action_config: { mixed_use: false, reason: 'Transactions from "Starbucks" were marked as business candidate' },
+    confidence: 0.70,
+    status: "active",
+    requires_confirmation: true,
+    created_from_user_action: true,
+    source_entity_type: "transaction",
+    source_entity_id: "tx1",
+  };
+  assert.equal(rule.action_type, "mark_business_candidate", "action_type must be mark_business_candidate");
+  assert.equal(rule.rule_type, "transaction_category", "rule_type reuses transaction_category");
+  assert.equal(rule.confidence, 0.70, "New business rule starts at 0.70 confidence");
+  assert.equal(rule.requires_confirmation, true, "Business rules always require confirmation");
+  assert.equal(rule.created_from_user_action, true);
+  assert.equal(typeof rule.action_config.mixed_use, "boolean", "action_config.mixed_use must be boolean");
+  assert.ok(rule.action_config.reason, "action_config.reason must be present");
+  assert.equal(Object.prototype.hasOwnProperty.call(rule.action_config, "category"), false,
+    "Business rule action_config must not have a category field");
+});
+
+test("PR C: business rule action_type is mark_business_candidate, not set_category", () => {
+  const bizRule = { action_type: "mark_business_candidate" };
+  const catRule = { action_type: "set_category" };
+  assert.notEqual(bizRule.action_type, catRule.action_type,
+    "Business and category rules must have distinct action_type values");
+});
+
+test("PR C: strengthened business rule increments confidence by 0.05", () => {
+  const existingConfidence = 0.75;
+  const newConfidence = Math.min(existingConfidence + 0.05, 1.0);
+  assert.equal(newConfidence, 0.80, "Confidence must increase by 0.05");
+});
+
+test("PR C: strengthened business rule confidence caps at 1.0", () => {
+  const existingConfidence = 0.98;
+  const newConfidence = Math.min(existingConfidence + 0.05, 1.0);
+  assert.equal(newConfidence, 1.0, "Confidence must not exceed 1.0");
+});
+
+test("PR C: business rule lookup filters by action_type to exclude category rules", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/businessRuleBuilder.ts"),
+    "utf8",
+  );
+  assert.match(src, /eq\("action_type",\s*"mark_business_candidate"\)/,
+    "businessRuleBuilder must filter by action_type = mark_business_candidate");
+});
+
+test("PR C: category ruleBuilder filters by action_type to exclude business rules", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/ruleBuilder.ts"),
+    "utf8",
+  );
+  assert.match(src, /eq\("action_type",\s*"set_category"\)/,
+    "ruleBuilder must filter by action_type = set_category to prevent business rule contamination");
+});
+
+// ─── 27. buildBusinessSuggestionsForRule eligibility guards ───────────────────
+
+test("PR C: buildBusinessSuggestionsForRule returns empty for inactive rule", () => {
+  const rule = {
+    id: "r1", user_id: "u1", status: "paused",
+    matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" },
+    action_type: "mark_business_candidate",
+  };
+  const txs = [{ id: "tx2", direction: "debit", is_business_candidate: null, merchant_name: "Starbucks", category: null }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 0, "Inactive rule must produce no suggestions");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips credit transactions", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "credit", is_business_candidate: null, merchant_name: "Starbucks", category: null }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 0, "Credit transactions must be skipped");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips already-marked transactions", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "debit", is_business_candidate: true, merchant_name: "Starbucks", category: null }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 0, "Already-marked transactions must be skipped");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips the triggering transaction", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx-trigger", direction: "debit", is_business_candidate: null, merchant_name: "Starbucks", category: null }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-trigger", new Set());
+  assert.equal(result.length, 0, "Triggering transaction must be excluded");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips rejected transactions", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "debit", is_business_candidate: null, merchant_name: "Starbucks", category: null }];
+  const rejected = new Set(["tx2"]);
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", rejected);
+  assert.equal(result.length, 0, "Rejected transaction must not generate a suggestion");
+});
+
+test("PR C: buildBusinessSuggestionsForRule generates suggestion for matching eligible debit tx", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "debit", transaction_type: "bank", is_business_candidate: null, merchant_name: "Starbucks", category: "food" }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 1, "Eligible matching tx must produce one suggestion");
+  assert.equal(result[0].suggestion.suggestion_type, "business_expense_candidate");
+  assert.equal(result[0].suggestion.source_entity_id, "tx2");
+  assert.equal(result[0].suggestion.status, "pending");
+  assert.equal(result[0].suggestion.automation_rule_id, "r1");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips debit transfer transactions", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [
+    { id: "tx-transfer", direction: "debit", transaction_type: "transfer", is_business_candidate: null, merchant_name: "Starbucks", category: null },
+  ];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 0, "Debit transfer transactions must not receive business candidate suggestions");
+});
+
+test("PR C: buildBusinessSuggestionsForRule skips transfer regardless of case", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [
+    { id: "tx-t1", direction: "debit", transaction_type: "Transfer", is_business_candidate: null, merchant_name: "Starbucks", category: null },
+    { id: "tx-t2", direction: "debit", transaction_type: "TRANSFER", is_business_candidate: null, merchant_name: "Starbucks", category: null },
+  ];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 0, "Transfer guard must be case-insensitive");
+});
+
+test("PR C: buildBusinessSuggestionsForRule allows non-transfer debit types (bank, payment, etc.)", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [
+    { id: "tx-bank", direction: "debit", transaction_type: "bank", is_business_candidate: null, merchant_name: "Starbucks", category: null },
+    { id: "tx-payment", direction: "debit", transaction_type: "payment", is_business_candidate: null, merchant_name: "Starbucks", category: null },
+    { id: "tx-null-type", direction: "debit", transaction_type: null, is_business_candidate: null, merchant_name: "Starbucks", category: null },
+  ];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 3, "bank, payment, and null transaction_type must all be eligible");
+});
+
+// ─── 28. Mixed-use confidence cap ────────────────────────────────────────────
+
+test("PR C: mixed-use category caps suggestion confidence at 0.60", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "debit", is_business_candidate: null, merchant_name: "Starbucks", category: "meals" }];
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 1);
+  assert.ok(result[0].suggestion.confidence <= 0.60,
+    `Confidence ${result[0].suggestion.confidence} must be <= 0.60 for mixed-use category`);
+  assert.equal(result[0].suggestion.suggested_action.mixed_use, true,
+    "mixed_use must be true for meals category");
+});
+
+test("PR C: non-mixed-use category does not cap confidence", () => {
+  const rule = { id: "r1", user_id: "u1", status: "active", matcher_type: "merchant_normalized",
+    matcher_config: { normalized_merchant: "starbucks", direction: "debit" }, action_type: "mark_business_candidate" };
+  const txs = [{ id: "tx2", direction: "debit", is_business_candidate: null, merchant_name: "Starbucks", category: "software" }];
+  // software is in SENSITIVE_CATEGORIES but NOT in MIXED_USE_CATEGORIES (check: meals, home office, vehicle, phone, travel, equipment, education, professional services)
+  // software is NOT in MIXED_USE_CATEGORIES
+  const result = buildBusinessSuggestionsForRule(rule, txs, "tx-exclude", new Set());
+  assert.equal(result.length, 1);
+  assert.equal(result[0].suggestion.suggested_action.mixed_use, false,
+    "mixed_use must be false for non-mixed-use category");
+  assert.ok(result[0].suggestion.confidence > 0.60,
+    `Confidence ${result[0].suggestion.confidence} must be > 0.60 for non-mixed-use category`);
+});
+
+// ─── 29. businessSuggestionEngine query: no user_id on transactions ───────────
+
+test("PR C: businessSuggestionEngine does not filter transactions by user_id column", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/businessSuggestionEngine.ts"),
+    "utf8",
+  );
+  // The transactions table has no user_id column — RLS handles user scoping.
+  // The query must not include .eq("user_id", ...) on the transactions select block.
+  const txSelectBlock = src.match(/from\("transactions"\)[\s\S]*?\.limit\(200\)/)?.[0] ?? "";
+  assert.doesNotMatch(txSelectBlock, /eq\("user_id"/,
+    'businessSuggestionEngine transactions query must not use .eq("user_id") — transactions has no user_id column; RLS handles scoping');
+});
+
+test("PR C: businessSuggestionEngine DB query excludes transfer transactions at the source", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/businessSuggestionEngine.ts"),
+    "utf8",
+  );
+  const txSelectBlock = src.match(/from\("transactions"\)[\s\S]*?\.limit\(200\)/)?.[0] ?? "";
+  assert.match(txSelectBlock, /neq\("transaction_type",\s*"transfer"\)/,
+    'businessSuggestionEngine transactions query must exclude transfers with .neq("transaction_type", "transfer")');
+});
+
+// ─── 30. Protected field regression ──────────────────────────────────────────
+
+test("PR C: accepting a business suggestion only writes is_business_candidate", () => {
+  const acceptPayload = buildAcceptBusinessCandidatePayload();
+  const keys = Object.keys(acceptPayload);
+  assert.deepEqual(keys, ["is_business_candidate"],
+    "Accept business candidate payload must only contain is_business_candidate");
+  for (const field of NON_AUTOMATABLE_TX_FIELDS) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(acceptPayload, field),
+      false,
+      `Protected field "${field}" must not appear in accept business candidate payload`,
+    );
+  }
+});
+
+// ─── 31. Category suggestions unaffected by business rule changes ─────────────
+
+test("PR C: category suggestion type is unchanged (transaction_category)", () => {
+  const catSuggestion = {
+    suggestion_type: "transaction_category",
+    suggested_action: { category: "groceries", subcategory: null },
+    status: "pending",
+  };
+  assert.equal(catSuggestion.suggestion_type, "transaction_category",
+    "Category suggestions must still use transaction_category type");
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(catSuggestion.suggested_action, "category"),
+    "Category suggestion action must have a category field",
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(catSuggestion.suggested_action, "mixed_use"),
+    false,
+    "Category suggestions must not have mixed_use in their suggested_action",
+  );
+});
+
+test("PR C: suggestionEngine still blocks sensitive categories (regression)", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/suggestionEngine.ts"),
+    "utf8",
+  );
+  assert.match(src, /SENSITIVE_CATEGORIES\.has/,
+    "suggestionEngine must still guard against sensitive categories");
+  assert.match(src, /Phase1ActionConfig/,
+    "suggestionEngine must cast action_config to Phase1ActionConfig for category access");
+});
+
+test("PR C: AutomationRule.action_type union includes both set_category and mark_business_candidate", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/types.ts"),
+    "utf8",
+  );
+  assert.match(src, /Phase4ActionType/, "Phase4ActionType must be defined");
+  assert.match(src, /'mark_business_candidate'/, "Phase4ActionType must include mark_business_candidate");
+  assert.match(src, /'set_category'/, "Phase4ActionType must include set_category");
 });

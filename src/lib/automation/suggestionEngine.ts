@@ -4,7 +4,7 @@
 
 import { SupabaseClient } from "@supabase/supabase-js";
 import { RawTransaction } from "../financialCalculations";
-import { AutomationRule, AutomationSuggestion } from "./types";
+import { AutomationRule, AutomationSuggestion, Phase1ActionConfig } from "./types";
 import { SENSITIVE_CATEGORIES } from "./constants";
 import { evaluateRule } from "./matcherEngine";
 
@@ -27,7 +27,8 @@ export function buildSuggestionsForRule(
   candidates: RawTransaction[],
   excludeTransactionId: string,
 ): PendingSuggestion[] {
-  if (SENSITIVE_CATEGORIES.has((rule.action_config.category ?? "").toLowerCase())) return [];
+  const catAction = rule.action_config as Phase1ActionConfig;
+  if (SENSITIVE_CATEGORIES.has((catAction.category ?? "").toLowerCase())) return [];
   if (rule.status !== "active") return [];
 
   const results: PendingSuggestion[] = [];
@@ -48,8 +49,8 @@ export function buildSuggestionsForRule(
         source_entity_type: "transaction",
         source_entity_id: tx.id,
         suggested_action: {
-          category: rule.action_config.category,
-          subcategory: rule.action_config.subcategory,
+          category: catAction.category,
+          subcategory: catAction.subcategory,
           reason: match.reason,
         },
         reason: match.reason,
