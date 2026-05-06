@@ -63,7 +63,7 @@ export const MIXED_USE_CATEGORIES: ReadonlySet<string> = new Set([
 export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
 
 // Controls whether write-off candidate suggestion generation is active.
-// Write-Off Candidate PR A: defaults to false — no mark-writeoff endpoint exists
-// yet and no suggestions are generated. Set to true only when the PR B write path
-// and PR C generation are merged and tested.
-export const WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED = false;
+// Write-Off Candidate PR C: enabled — mark-writeoff route now calls
+// generateAndStoreWriteOffSuggestions when a rule is learned.
+// Rollback: set to false to disable generation and dormant the UI suggestion panel.
+export const WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED = true;

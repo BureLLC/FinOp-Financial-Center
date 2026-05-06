@@ -172,15 +172,16 @@ test("migration 009: does not CREATE apply_writeoff_candidate_suggestion functio
 
 // ─── 3. WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED defaults false ────────────────
 
-test("WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED is defined and defaults to false in PR A", () => {
+test("WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED is defined and enabled in PR C", () => {
+  // PR A false guard retired — PR C enables the flag.
   const src = readFileSync(
     path.join(ROOT, "src/lib/automation/constants.ts"),
     "utf8",
   );
   const match = src.match(/WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED\s*=\s*(true|false)/);
   assert.ok(match, "WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED must be defined in constants.ts");
-  assert.equal(match[1], "false",
-    "Must default to false in PR A — no suggestion generation yet");
+  assert.equal(match[1], "true",
+    "PR C enables suggestion generation — flag must be true");
 });
 
 test("BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is still true and unchanged", () => {
@@ -580,14 +581,15 @@ test("writeOffRuleBuilder.ts exists (shipped in PR B)", () => {
     "writeOffRuleBuilder.ts must exist — shipped in PR B");
 });
 
-test("no writeOffSuggestionEngine.ts exists in PR A", () => {
+test("writeOffSuggestionEngine.ts exists (shipped in PR C)", () => {
+  // PR A absence guard retired — PR C ships writeOffSuggestionEngine.ts.
   let exists = false;
   try {
     readFileSync(path.join(ROOT, "src/lib/automation/writeOffSuggestionEngine.ts"), "utf8");
     exists = true;
   } catch {
-    // File not found is expected in PR A
+    // ignore
   }
-  assert.equal(exists, false,
-    "writeOffSuggestionEngine.ts must not exist in PR A — it ships in PR C");
+  assert.equal(exists, true,
+    "writeOffSuggestionEngine.ts must exist — shipped in PR C");
 });
