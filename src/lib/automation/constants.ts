@@ -23,8 +23,9 @@ export const SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set([
 // Used in tests to enumerate protected fields and in API layer documentation.
 // The Postgres apply function enforces this structurally by only issuing
 // UPDATE ... SET category = ..., subcategory = ...
-// Phase 4 note: is_business_candidate is intentionally NOT in this list —
-// it is the one additional field that Phase 4 automation is permitted to write.
+// Phase 4 note: is_business_candidate and is_writeoff_candidate are intentionally
+// NOT in this list — they are the only transaction fields automation is permitted
+// to write. All other fields listed here are permanently protected.
 export const NON_AUTOMATABLE_TX_FIELDS: readonly string[] = [
   "income_subtype",
   "direction",
@@ -60,3 +61,9 @@ export const MIXED_USE_CATEGORIES: ReadonlySet<string> = new Set([
 // Phase 4 PR C: enabled — mark-business now creates/strengthens automation rules
 // and generates business_expense_candidate suggestions for similar debit transactions.
 export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
+
+// Controls whether write-off candidate suggestion generation is active.
+// Write-Off Candidate PR A: defaults to false — no mark-writeoff endpoint exists
+// yet and no suggestions are generated. Set to true only when the PR B write path
+// and PR C generation are merged and tested.
+export const WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED = false;

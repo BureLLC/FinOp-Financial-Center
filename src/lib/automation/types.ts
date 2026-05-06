@@ -40,7 +40,7 @@ export interface AutomationRule {
   matcher_type: Phase1MatcherType;
   matcher_config: Phase1MatcherConfig;
   action_type: Phase4ActionType;
-  action_config: Phase1ActionConfig | BusinessExpenseActionConfig;
+  action_config: Phase1ActionConfig | BusinessExpenseActionConfig | WriteOffCandidateActionConfig;
   confidence: number;
   status: RuleStatus;
   requires_confirmation: boolean;
@@ -61,7 +61,7 @@ export interface AutomationSuggestion {
   suggestion_type: Phase4SuggestionType;
   source_entity_type: 'transaction';
   source_entity_id: string;
-  suggested_action: (Phase1ActionConfig & { reason: string }) | BusinessExpenseActionConfig;
+  suggested_action: (Phase1ActionConfig & { reason: string }) | BusinessExpenseActionConfig | WriteOffCandidateActionConfig;
   reason: string | null;
   confidence: number;
   status: Phase1SuggestionStatus;
@@ -84,7 +84,9 @@ export interface AutomationAuditEntry {
     | 'undo_set_subcategory'
     | 'user_manual_category'
     | 'mark_business_candidate'
-    | 'undo_mark_business_candidate';
+    | 'undo_mark_business_candidate'
+    | 'mark_writeoff_candidate'
+    | 'undo_mark_writeoff_candidate';
   previous_value: Record<string, unknown> | null;
   new_value: Record<string, unknown> | null;
   confidence: number | null;
@@ -93,16 +95,31 @@ export interface AutomationAuditEntry {
   created_at: string;
 }
 
-// ─── Phase 4 type extensions ──────────────────────────────────────────────────
+// ─── Phase 4 + Write-Off Candidate type extensions ───────────────────────────
 
-export type Phase4ActionType = Phase1ActionType | 'mark_business_candidate';
-export type Phase4SuggestionType = Phase1RuleType | 'business_expense_candidate';
+export type Phase4ActionType =
+  | Phase1ActionType
+  | 'mark_business_candidate'
+  | 'mark_writeoff_candidate';
+
+export type Phase4SuggestionType =
+  | Phase1RuleType
+  | 'business_expense_candidate'
+  | 'write_off_candidate';
 
 // Action config for business expense candidate suggestions.
 // mixed_use: true when the merchant matches MIXED_USE_CATEGORIES.
 // reason: human-readable explanation surfaced in the Phase 4 PR B UI.
 export interface BusinessExpenseActionConfig {
   mixed_use: boolean;
+  reason: string;
+}
+
+// Action config for write-off candidate suggestions.
+// reason: human-readable explanation surfaced in the Write-Off Candidate UI (PR B).
+// Does not include mixed_use — write-off candidate eligibility does not use that concept.
+// Does not include category — this action never sets a category on the transaction.
+export interface WriteOffCandidateActionConfig {
   reason: string;
 }
 
