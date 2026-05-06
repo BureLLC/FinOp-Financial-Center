@@ -481,6 +481,41 @@ export default function TransactionsPage() {
     setOpenBizSuggestionId(null);
   };
 
+  const acceptWriteoffSuggestion = async (suggestionId: string, txId: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/accept`, { method: "POST" });
+    if (!res.ok) return;
+    const resData = await res.json().catch(() => ({}));
+    const auditId: string | null = resData.auditId ?? null;
+    const merchantName = transactions.find((t) => t.id === txId)?.merchant_name ?? null;
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === txId ? { ...t, is_writeoff_candidate: true } : t))
+    );
+    setWriteoffSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenWriteoffSuggestionId(null);
+    if (auditId) {
+      setUndoEntry({ kind: "writeoff", txId, auditId, merchantName });
+    }
+  };
+
+  const rejectWriteoffSuggestion = async (suggestionId: string, txId: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rejection_reason: "skipped" }),
+    });
+    if (!res.ok) return;
+    setWriteoffSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenWriteoffSuggestionId(null);
+  };
+
   const markBusiness = async () => {
     if (!selected) return;
     setMarkingBusiness(true);
@@ -526,6 +561,9 @@ export default function TransactionsPage() {
     setMarkingWriteOff(false);
     if (auditId) {
       setUndoEntry({ kind: "writeoff", txId: selected.id, auditId, merchantName });
+    }
+    if ((resData.suggestionsCreated ?? 0) > 0) {
+      await loadSuggestions();
     }
   };
 
@@ -966,7 +1004,7 @@ export default function TransactionsPage() {
                         )}
                         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
                           <button
-                            onClick={(e) => { e.stopPropagation(); /* accept handled via suggestion accept route */ }}
+                            onClick={(e) => { e.stopPropagation(); acceptWriteoffSuggestion(writeoffSuggestion.id, tx.id); }}
                             style={{
                               padding: "6px 14px", fontSize: "12px", fontWeight: 600,
                               background: "rgba(20,184,166,0.15)",
@@ -977,7 +1015,7 @@ export default function TransactionsPage() {
                             Mark as Write-Off Candidate
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); setOpenWriteoffSuggestionId(null); }}
+                            onClick={(e) => { e.stopPropagation(); rejectWriteoffSuggestion(writeoffSuggestion.id, tx.id); }}
                             style={{
                               padding: "6px 12px", fontSize: "12px", fontWeight: 500,
                               background: "transparent", border: "none",

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createRouteClient } from "../../../../../../src/lib/automation/serverSupabase";
 import { WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED } from "../../../../../../src/lib/automation/constants";
 import { createOrStrengthenWriteOffRule } from "../../../../../../src/lib/automation/writeOffRuleBuilder";
+import { generateAndStoreWriteOffSuggestions } from "../../../../../../src/lib/automation/writeOffSuggestionEngine";
 
 // Writes only: transactions.is_writeoff_candidate
 // Never writes: category, subcategory, income_subtype, direction, amount,
@@ -76,15 +77,20 @@ export async function POST(
   const description = (txRow as { description: string | null }).description ?? null;
   const direction = (txRow as { direction: string }).direction ?? "debit";
 
-  await createOrStrengthenWriteOffRule(
+  const { rule } = await createOrStrengthenWriteOffRule(
     { userId, transactionId, merchantName, description, direction },
     supabase,
   );
+
+  let suggestionsCreated = 0;
+  if (WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED && rule) {
+    suggestionsCreated = await generateAndStoreWriteOffSuggestions(rule, transactionId, supabase);
+  }
 
   return NextResponse.json({
     success: true,
     auditId: auditRow?.id ?? null,
     suggestionsEnabled: WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED,
-    suggestionsCreated: 0,
+    suggestionsCreated,
   });
 }

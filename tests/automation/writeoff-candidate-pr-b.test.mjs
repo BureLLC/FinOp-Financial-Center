@@ -82,13 +82,14 @@ test("mark-writeoff-candidate route does not create write-offs or affect tax", (
   assert.doesNotMatch(src, /canonicalFinancialData/i, "Must not import canonicalFinancialData");
 });
 
-test("mark-writeoff-candidate route does not generate suggestions", () => {
+test("mark-writeoff-candidate route generates suggestions via writeOffSuggestionEngine (PR C)", () => {
+  // PR B absence guard retired — PR C has wired suggestion generation.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/transactions/[id]/mark-writeoff-candidate/route.ts"),
     "utf8",
   );
-  assert.doesNotMatch(src, /generateAndStoreWriteOffSuggestions/, "Must not call suggestion generation (PR C)");
-  assert.doesNotMatch(src, /writeOffSuggestionEngine/, "Must not import writeOffSuggestionEngine (PR C)");
+  assert.match(src, /generateAndStoreWriteOffSuggestions/, "Route must call generateAndStoreWriteOffSuggestions (PR C)");
+  assert.match(src, /writeOffSuggestionEngine/, "Route must import writeOffSuggestionEngine (PR C)");
 });
 
 test("mark-writeoff-candidate route returns suggestionsEnabled field", () => {
@@ -560,15 +561,16 @@ test("financialCalculations.ts does not reference is_writeoff_candidate", () => 
 // 8. Feature flag: WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED remains false
 // ═══════════════════════════════════════════════════════════════════════════════
 
-test("WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED is false in PR B", () => {
+test("WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED is true in PR C (enabled)", () => {
+  // PR B false guard retired — PR C enables the flag.
   const src = readFileSync(
     path.join(ROOT, "src/lib/automation/constants.ts"),
     "utf8",
   );
   assert.match(
     src,
-    /WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED\s*=\s*false/,
-    "Feature flag must remain false in PR B",
+    /WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED\s*=\s*true/,
+    "Feature flag must be true in PR C — generation is enabled",
   );
 });
 
@@ -588,20 +590,22 @@ test("BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is still true (unchanged by PR B)", (
 // 9. No suggestion generation in PR B
 // ═══════════════════════════════════════════════════════════════════════════════
 
-test("writeOffSuggestionEngine.ts does not exist in PR B", () => {
+test("writeOffSuggestionEngine.ts exists (shipped in PR C)", () => {
+  // PR B absence guard retired — PR C has shipped writeOffSuggestionEngine.ts.
   const p = path.join(ROOT, "src/lib/automation/writeOffSuggestionEngine.ts");
-  assert.ok(!existsSync(p), "writeOffSuggestionEngine.ts must not exist in PR B — deferred to PR C");
+  assert.ok(existsSync(p), "writeOffSuggestionEngine.ts must exist — shipped in PR C");
 });
 
-test("mark-writeoff-candidate route does not call generateAndStoreWriteOffSuggestions", () => {
+test("mark-writeoff-candidate route calls generateAndStoreWriteOffSuggestions (PR C)", () => {
+  // PR B absence guard retired — PR C wires suggestion generation.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/transactions/[id]/mark-writeoff-candidate/route.ts"),
     "utf8",
   );
-  assert.doesNotMatch(
+  assert.match(
     src,
     /generateAndStoreWriteOffSuggestions/,
-    "Suggestion generation must not be wired in PR B",
+    "Suggestion generation must be wired in PR C",
   );
 });
 
