@@ -5,7 +5,7 @@ import { createClient } from "../../../src/lib/supabase";
 import { activePostedTransactions, deduplicateTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 import { getCanonicalDeduplicatedTransactions } from "../../../src/lib/canonicalFinancialData";
 import type { AutomationSuggestion } from "../../../src/lib/automation/types";
-import { SENSITIVE_CATEGORIES, BUSINESS_EXPENSE_SUGGESTIONS_ENABLED, MIXED_USE_CATEGORIES } from "../../../src/lib/automation/constants";
+import { SENSITIVE_CATEGORIES, BUSINESS_EXPENSE_SUGGESTIONS_ENABLED, MIXED_USE_CATEGORIES, WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED } from "../../../src/lib/automation/constants";
 
 interface Transaction {
   id: string;
@@ -25,6 +25,7 @@ interface Transaction {
   external_transaction_id: string | null;
   deleted_at: string | null;
   is_business_candidate: boolean | null;
+  is_writeoff_candidate: boolean | null;
 }
 
 interface Account {
@@ -160,6 +161,7 @@ export default function TransactionsPage() {
   const [undoEntry, setUndoEntry] = useState<
     | { kind: "category"; txId: string; auditId: string; prevCategory: string | null; category: string }
     | { kind: "business"; txId: string; auditId: string; merchantName: string | null }
+    | { kind: "writeoff"; txId: string; auditId: string; merchantName: string | null }
     | null
   >(null);
   // Which transaction's category suggestion is in the reason-picker step
@@ -169,6 +171,14 @@ export default function TransactionsPage() {
   const [bizConfirmOpen, setBizConfirmOpen] = useState(false);
   const [markingBusiness, setMarkingBusiness] = useState(false);
   const [bizMarkError, setBizMarkError] = useState<string | null>(null);
+  // Write-off candidate suggestion map — populated only when flag is true (dormant in PR B)
+  const [writeoffSuggestions, setWriteoffSuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
+  // Write-off candidate suggestion panel open state (by transaction id)
+  const [openWriteoffSuggestionId, setOpenWriteoffSuggestionId] = useState<string | null>(null);
+  // Write-off candidate manual mark state
+  const [writeoffConfirmOpen, setWriteoffConfirmOpen] = useState(false);
+  const [markingWriteOff, setMarkingWriteOff] = useState(false);
+  const [writeoffMarkError, setWriteoffMarkError] = useState<string | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -200,15 +210,22 @@ export default function TransactionsPage() {
       const { suggestions: data } = await res.json();
       const catMap = new Map<string, AutomationSuggestion>();
       const bizMap = new Map<string, AutomationSuggestion>();
+      const writeoffMap = new Map<string, AutomationSuggestion>();
       for (const s of (data ?? [])) {
         if (s.suggestion_type === "business_expense_candidate") {
           bizMap.set(s.source_entity_id, s);
+        } else if (s.suggestion_type === "write_off_candidate") {
+          // Only populate when flag is enabled — dormant in PR B
+          if (WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED) {
+            writeoffMap.set(s.source_entity_id, s);
+          }
         } else {
           catMap.set(s.source_entity_id, s);
         }
       }
       setCategorySuggestions(catMap);
       setBizSuggestions(bizMap);
+      setWriteoffSuggestions(writeoffMap);
     } catch {
       // Suggestions are non-critical; silent fail is acceptable
     }
@@ -241,6 +258,8 @@ export default function TransactionsPage() {
     setPanelMsg(null);
     setBizConfirmOpen(false);
     setBizMarkError(null);
+    setWriteoffConfirmOpen(false);
+    setWriteoffMarkError(null);
   };
 
   const saveChanges = async () => {
@@ -415,6 +434,10 @@ export default function TransactionsPage() {
       setTransactions((prev) =>
         prev.map((t) => (t.id === entry.txId ? { ...t, category: entry.prevCategory } : t))
       );
+    } else if (entry.kind === "writeoff") {
+      setTransactions((prev) =>
+        prev.map((t) => (t.id === entry.txId ? { ...t, is_writeoff_candidate: null } : t))
+      );
     } else {
       setTransactions((prev) =>
         prev.map((t) => (t.id === entry.txId ? { ...t, is_business_candidate: null } : t))
@@ -479,6 +502,30 @@ export default function TransactionsPage() {
     setMarkingBusiness(false);
     if (auditId) {
       setUndoEntry({ kind: "business", txId: selected.id, auditId, merchantName });
+    }
+  };
+
+  const markWriteOff = async () => {
+    if (!selected) return;
+    setMarkingWriteOff(true);
+    setWriteoffMarkError(null);
+    const res = await fetch(`/api/automation/transactions/${selected.id}/mark-writeoff-candidate`, { method: "POST" });
+    if (!res.ok) {
+      setWriteoffMarkError("Failed to mark. Please try again.");
+      setMarkingWriteOff(false);
+      return;
+    }
+    const resData = await res.json().catch(() => ({}));
+    const auditId: string | null = resData.auditId ?? null;
+    const merchantName = selected.merchant_name ?? null;
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === selected.id ? { ...t, is_writeoff_candidate: true } : t))
+    );
+    setSelected((prev) => (prev ? { ...prev, is_writeoff_candidate: true } : null));
+    setWriteoffConfirmOpen(false);
+    setMarkingWriteOff(false);
+    if (auditId) {
+      setUndoEntry({ kind: "writeoff", txId: selected.id, auditId, merchantName });
     }
   };
 
@@ -569,23 +616,25 @@ export default function TransactionsPage() {
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
             gap: "12px", padding: "10px 14px", marginBottom: "12px",
-            background: undoEntry.kind === "business" ? "rgba(245,158,11,0.08)" : "rgba(99,102,241,0.08)",
-            border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.3)" : "rgba(99,102,241,0.25)"}`,
+            background: undoEntry.kind === "business" ? "rgba(245,158,11,0.08)" : undoEntry.kind === "writeoff" ? "rgba(20,184,166,0.08)" : "rgba(99,102,241,0.08)",
+            border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.3)" : undoEntry.kind === "writeoff" ? "rgba(20,184,166,0.3)" : "rgba(99,102,241,0.25)"}`,
             borderRadius: "9px",
           }}>
             <span style={{ fontSize: "12px", color: "#94a3b8" }}>
               {undoEntry.kind === "category"
                 ? <><strong style={{ color: "#e2e8f0" }}>{undoEntry.category}</strong> category applied</>
+                : undoEntry.kind === "writeoff"
+                ? <>Marked <strong style={{ color: "#e2e8f0" }}>{undoEntry.merchantName ?? "transaction"}</strong> as Write-Off Candidate</>
                 : <>Marked <strong style={{ color: "#e2e8f0" }}>{undoEntry.merchantName ?? "transaction"}</strong> as Business Candidate</>
               }
             </span>
             <div style={{ display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 }}>
               <button onClick={undoAccept} style={{
                 padding: "4px 12px", fontSize: "11px", fontWeight: 600,
-                background: undoEntry.kind === "business" ? "rgba(245,158,11,0.15)" : "rgba(99,102,241,0.2)",
-                border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.4)" : "rgba(99,102,241,0.4)"}`,
+                background: undoEntry.kind === "business" ? "rgba(245,158,11,0.15)" : undoEntry.kind === "writeoff" ? "rgba(20,184,166,0.15)" : "rgba(99,102,241,0.2)",
+                border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.4)" : undoEntry.kind === "writeoff" ? "rgba(20,184,166,0.4)" : "rgba(99,102,241,0.4)"}`,
                 borderRadius: "6px",
-                color: undoEntry.kind === "business" ? "#f59e0b" : "#818cf8",
+                color: undoEntry.kind === "business" ? "#f59e0b" : undoEntry.kind === "writeoff" ? "#2dd4bf" : "#818cf8",
                 cursor: "pointer",
               }}>
                 Undo
@@ -615,9 +664,11 @@ export default function TransactionsPage() {
               const isCredit = tx.direction === "credit";
               const catSuggestion = categorySuggestions.get(tx.id);
               const bizSuggestion = BUSINESS_EXPENSE_SUGGESTIONS_ENABLED ? bizSuggestions.get(tx.id) : undefined;
+              const writeoffSuggestion = WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED ? writeoffSuggestions.get(tx.id) : undefined;
               const catSuggestionOpen = openSuggestion === tx.id;
               const bizSuggestionOpen = openBizSuggestionId === tx.id;
-              const anyPanelOpen = catSuggestionOpen || bizSuggestionOpen;
+              const writeoffSuggestionOpen = openWriteoffSuggestionId === tx.id;
+              const anyPanelOpen = catSuggestionOpen || bizSuggestionOpen || writeoffSuggestionOpen;
               return (
                 <div key={tx.id} style={{ display: "flex", flexDirection: "column", gap: "0" }}>
                   <div onClick={() => openPanel(tx)}
@@ -695,6 +746,20 @@ export default function TransactionsPage() {
                             }}
                           >
                             Biz?
+                          </button>
+                        )}
+                        {writeoffSuggestion && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenWriteoffSuggestionId(writeoffSuggestionOpen ? null : tx.id); }}
+                            style={{
+                              fontSize: "10px", fontWeight: 600, color: "#2dd4bf",
+                              background: "rgba(20,184,166,0.1)",
+                              padding: "1px 8px", borderRadius: "99px",
+                              border: "1px solid rgba(20,184,166,0.3)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Write-Off?
                           </button>
                         )}
                       </div>
@@ -816,7 +881,7 @@ export default function TransactionsPage() {
                         background: "rgba(245,158,11,0.06)",
                         border: "1px solid rgba(245,158,11,0.2)",
                         borderTop: "none",
-                        borderRadius: "0 0 10px 10px",
+                        borderRadius: writeoffSuggestion && writeoffSuggestionOpen ? "0 0 0 0" : "0 0 10px 10px",
                       }}>
                         <div style={{ fontSize: "11px", color: "#f59e0b", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
                           BUSINESS EXPENSE CANDIDATE
@@ -864,6 +929,55 @@ export default function TransactionsPage() {
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); setOpenBizSuggestionId(null); }}
+                            style={{
+                              padding: "6px 12px", fontSize: "12px", fontWeight: 500,
+                              background: "transparent", border: "none",
+                              borderRadius: "7px", color: "#334155", cursor: "pointer",
+                            }}
+                          >
+                            Not now
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Write-off candidate suggestion inline panel — dormant while WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED is false */}
+                  {writeoffSuggestion && writeoffSuggestionOpen && (() => {
+                    const writeoffAction = writeoffSuggestion.suggested_action as { reason?: string };
+                    return (
+                      <div style={{
+                        padding: "12px 16px",
+                        background: "rgba(20,184,166,0.06)",
+                        border: "1px solid rgba(20,184,166,0.2)",
+                        borderTop: "none",
+                        borderRadius: "0 0 10px 10px",
+                      }}>
+                        <div style={{ fontSize: "11px", color: "#2dd4bf", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
+                          WRITE-OFF CANDIDATE
+                        </div>
+                        <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "8px" }}>
+                          This transaction may be eligible for write-off review. Marking it does not create a write-off or affect your taxes.
+                        </div>
+                        {writeoffAction.reason && (
+                          <div style={{ fontSize: "11px", color: "#475569", marginBottom: "8px" }}>
+                            {writeoffAction.reason}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); /* accept handled via suggestion accept route */ }}
+                            style={{
+                              padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                              background: "rgba(20,184,166,0.15)",
+                              border: "1px solid rgba(20,184,166,0.4)",
+                              borderRadius: "7px", color: "#2dd4bf", cursor: "pointer",
+                            }}
+                          >
+                            Mark as Write-Off Candidate
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenWriteoffSuggestionId(null); }}
                             style={{
                               padding: "6px 12px", fontSize: "12px", fontWeight: 500,
                               background: "transparent", border: "none",
@@ -1071,6 +1185,71 @@ export default function TransactionsPage() {
                 onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
               >
                 Mark as Business Candidate
+              </button>
+            )}
+
+            {/* Write-Off Candidate */}
+            {selected.is_writeoff_candidate ? (
+              <div style={{
+                padding: "10px 12px", marginBottom: "12px",
+                background: "rgba(20,184,166,0.08)",
+                border: "1px solid rgba(20,184,166,0.2)",
+                borderRadius: "8px",
+                fontSize: "12px", color: "#2dd4bf", fontWeight: 600,
+                textAlign: "center",
+              }}>
+                Write-Off Candidate
+              </div>
+            ) : writeoffConfirmOpen ? (
+              <div style={{
+                padding: "12px", marginBottom: "12px",
+                background: "rgba(20,184,166,0.06)",
+                border: "1px solid rgba(20,184,166,0.2)",
+                borderRadius: "8px",
+              }}>
+                <div style={{ fontSize: "11px", color: "#94a3b8", marginBottom: "8px" }}>
+                  This only marks the transaction for write-off review. It does not create a write-off, calculate a deduction, or affect your taxes.
+                </div>
+                {writeoffMarkError && (
+                  <div style={{ fontSize: "11px", color: "#ef4444", marginBottom: "8px" }}>{writeoffMarkError}</div>
+                )}
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={markWriteOff} disabled={markingWriteOff}
+                    style={{
+                      flex: 1, padding: "8px", fontSize: "12px", fontWeight: 600,
+                      background: "rgba(20,184,166,0.15)",
+                      border: "1px solid rgba(20,184,166,0.4)",
+                      borderRadius: "7px", color: "#2dd4bf",
+                      cursor: markingWriteOff ? "not-allowed" : "pointer",
+                      opacity: markingWriteOff ? 0.7 : 1,
+                    }}>
+                    {markingWriteOff ? "Marking..." : "Confirm"}
+                  </button>
+                  <button onClick={() => { setWriteoffConfirmOpen(false); setWriteoffMarkError(null); }}
+                    style={{
+                      padding: "8px 14px", fontSize: "12px", fontWeight: 500,
+                      background: "transparent",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: "7px", color: "#475569", cursor: "pointer",
+                    }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setWriteoffConfirmOpen(true)}
+                style={{
+                  width: "100%", padding: "10px", marginBottom: "10px",
+                  background: "transparent",
+                  border: "1px solid rgba(20,184,166,0.25)",
+                  borderRadius: "9px", color: "#2dd4bf",
+                  fontSize: "13px", fontWeight: 600,
+                  cursor: "pointer", transition: "all 0.15s ease",
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "rgba(20,184,166,0.06)"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+              >
+                Mark as Write-Off Candidate
               </button>
             )}
 

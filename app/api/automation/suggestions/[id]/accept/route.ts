@@ -21,13 +21,27 @@ export async function POST(
 
   if (!suggestion) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // ─── Branch: write-off candidate — not yet implemented (PR A placeholder) ────
-  // The apply_writeoff_candidate_suggestion RPC and full accept path are added in PR B.
+  // ─── Branch: write-off candidate ─────────────────────────────────────────────
   if (suggestion.suggestion_type === "write_off_candidate") {
-    return NextResponse.json(
-      { error: "write_off_candidate accept is not yet implemented" },
-      { status: 501 },
-    );
+    if (suggestion.status !== "pending") {
+      return NextResponse.json({ error: "Suggestion is not pending" }, { status: 400 });
+    }
+
+    // Single atomic RPC: ownership, status, type guards + transaction update +
+    // suggestion status update + audit log insert all run in one plpgsql transaction.
+    const { data, error } = await supabase.rpc("apply_writeoff_candidate_suggestion", {
+      p_suggestion_id: id,
+      p_user_id: userId,
+    });
+
+    if (error) {
+      const isAuth = error.message?.includes("Unauthorized");
+      const status = isAuth ? 403 : 500;
+      return NextResponse.json({ error: error.message }, { status });
+    }
+
+    const result = data as { success: boolean; audit_id: string | null } | null;
+    return NextResponse.json({ success: true, auditId: result?.audit_id ?? null });
   }
 
   // ─── Branch: business expense candidate ──────────────────────────────────────

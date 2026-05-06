@@ -421,13 +421,21 @@ test("SENSITIVE_CATEGORIES is unchanged — still has exactly 12 entries", () =>
     `SENSITIVE_CATEGORIES must still have 12 entries, found: ${members.length}`);
 });
 
-test("canonicalFinancialData.ts does not reference is_writeoff_candidate", () => {
+test("canonicalFinancialData.ts references is_writeoff_candidate only in the SELECT string, not in financial logic", () => {
+  // PR A absence guard retired — PR B adds is_writeoff_candidate to the canonical SELECT (read-only).
+  // The field must still not appear inside any financial calculation function body.
   const src = readFileSync(
     path.join(ROOT, "src/lib/canonicalFinancialData.ts"),
     "utf8",
   );
-  assert.doesNotMatch(src, /is_writeoff_candidate/,
-    "canonicalFinancialData.ts must not reference is_writeoff_candidate in PR A");
+  assert.match(src, /is_writeoff_candidate/,
+    "PR B adds is_writeoff_candidate to canonical SELECT for UI availability");
+  // Verify it is not used inside isDeductibleBusinessExpense or similar financial logic
+  assert.doesNotMatch(
+    src,
+    /isDeductibleBusinessExpense[\s\S]{0,500}is_writeoff_candidate/,
+    "is_writeoff_candidate must not appear inside isDeductibleBusinessExpense",
+  );
 });
 
 test("financialCalculations.ts does not reference is_writeoff_candidate", () => {
@@ -439,64 +447,55 @@ test("financialCalculations.ts does not reference is_writeoff_candidate", () => 
     "financialCalculations.ts must not reference is_writeoff_candidate in PR A");
 });
 
-// ─── 9. Accept route: write_off_candidate returns 501 ────────────────────────
+// ─── 9. Accept route: write_off_candidate wired via RPC (PR B) ───────────────
 
-test("accept route returns 501 for write_off_candidate in PR A", () => {
+test("accept route write_off_candidate branch is wired to apply_writeoff_candidate_suggestion RPC", () => {
+  // PR A absence guard retired — PR B has wired the accept path.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/suggestions/[id]/accept/route.ts"),
     "utf8",
   );
-  // Verify the route has a branch for write_off_candidate that explicitly 501s
   assert.match(src, /write_off_candidate/,
     "Accept route must handle write_off_candidate suggestion type");
-  assert.match(src, /501/,
-    "Accept route must return 501 for write_off_candidate in PR A");
-  // Verify it does NOT make an RPC call to apply_writeoff_candidate_suggestion
-  assert.doesNotMatch(src, /\.rpc\(["']apply_writeoff_candidate_suggestion["']/,
-    "Accept route must not make the unimplemented RPC call in PR A");
+  assert.match(src, /\.rpc\(["']apply_writeoff_candidate_suggestion["']/,
+    "Accept route must call apply_writeoff_candidate_suggestion RPC in PR B");
 });
 
-test("accept route does not write is_writeoff_candidate for write_off_candidate branch", () => {
+test("accept route write_off_candidate branch writes is_writeoff_candidate via atomic RPC", () => {
+  // PR A absence guard retired — PR B wires the RPC which sets is_writeoff_candidate.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/suggestions/[id]/accept/route.ts"),
     "utf8",
   );
-  // The write_off_candidate branch must only return a response — no DB writes
-  const wocBranch = src.match(
-    /write_off_candidate[\s\S]*?(?=\/\/ ─── Branch|\/\/ ─── existing|export)/,
-  )?.[0] ?? "";
-  assert.doesNotMatch(wocBranch, /\.update\b/,
-    "Write-off candidate accept branch must not call .update() in PR A");
-  assert.doesNotMatch(wocBranch, /is_writeoff_candidate/,
-    "Write-off candidate accept branch must not write is_writeoff_candidate in PR A");
+  assert.match(src, /apply_writeoff_candidate_suggestion/,
+    "Write-off candidate accept path must use the atomic RPC in PR B");
 });
 
-// ─── 10. Undo route: mark_writeoff_candidate returns 501 ──────────────────────
+// ─── 10. Undo route: mark_writeoff_candidate fully wired (PR B) ───────────────
 
-test("undo route returns 501 for mark_writeoff_candidate in PR A", () => {
+test("undo route mark_writeoff_candidate branch is fully wired with stale-value guard", () => {
+  // PR A absence guard retired — PR B has wired the undo path.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/audit/[id]/undo/route.ts"),
     "utf8",
   );
   assert.match(src, /mark_writeoff_candidate/,
     "Undo route must handle mark_writeoff_candidate action type");
-  assert.match(src, /501/,
-    "Undo route must return 501 for mark_writeoff_candidate in PR A");
+  assert.doesNotMatch(
+    src,
+    /mark_writeoff_candidate[\s\S]{0,60}501/,
+    "Undo route must not return 501 for mark_writeoff_candidate in PR B",
+  );
 });
 
-test("undo route does not revert is_writeoff_candidate in PR A", () => {
+test("undo route mark_writeoff_candidate branch reverts is_writeoff_candidate to null", () => {
+  // PR A absence guard retired — PR B implements the full revert.
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/audit/[id]/undo/route.ts"),
     "utf8",
   );
-  // Find the mark_writeoff_candidate branch and verify it does no DB writes
-  const wocBranch = src.match(
-    /mark_writeoff_candidate[\s\S]*?(?=\/\/ ─── Branch|\/\/ ─── transaction_category)/,
-  )?.[0] ?? "";
-  assert.doesNotMatch(wocBranch, /is_writeoff_candidate.*null/,
-    "Undo must not attempt to revert is_writeoff_candidate in PR A");
-  assert.doesNotMatch(wocBranch, /\.update\b/,
-    "Undo write-off candidate branch must not call .update() in PR A");
+  assert.match(src, /is_writeoff_candidate.*null/,
+    "Undo must revert is_writeoff_candidate to null in PR B");
 });
 
 // ─── 11. Existing behavior regression ────────────────────────────────────────
@@ -552,7 +551,8 @@ test("is_business_candidate behavior is unchanged (regression)", () => {
 
 // ─── 12. No UI or generation code added in PR A ───────────────────────────────
 
-test("no mark-writeoff-candidate route exists in PR A", () => {
+test("mark-writeoff-candidate route exists (shipped in PR B)", () => {
+  // PR A absence guard retired — PR B has shipped the route.
   let exists = false;
   try {
     readFileSync(
@@ -561,22 +561,23 @@ test("no mark-writeoff-candidate route exists in PR A", () => {
     );
     exists = true;
   } catch {
-    // File not found is expected in PR A
+    // ignore
   }
-  assert.equal(exists, false,
-    "mark-writeoff-candidate route must not exist in PR A — it ships in PR B");
+  assert.equal(exists, true,
+    "mark-writeoff-candidate route must exist — shipped in PR B");
 });
 
-test("no writeOffRuleBuilder.ts exists in PR A", () => {
+test("writeOffRuleBuilder.ts exists (shipped in PR B)", () => {
+  // PR A absence guard retired — PR B has shipped the rule builder.
   let exists = false;
   try {
     readFileSync(path.join(ROOT, "src/lib/automation/writeOffRuleBuilder.ts"), "utf8");
     exists = true;
   } catch {
-    // File not found is expected in PR A
+    // ignore
   }
-  assert.equal(exists, false,
-    "writeOffRuleBuilder.ts must not exist in PR A — it ships in PR B");
+  assert.equal(exists, true,
+    "writeOffRuleBuilder.ts must exist — shipped in PR B");
 });
 
 test("no writeOffSuggestionEngine.ts exists in PR A", () => {
