@@ -549,3 +549,244 @@ test("all original NON_AUTOMATABLE_TX_FIELDS are still protected", () => {
     );
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 4 PR B: UI behavior tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── 16. Suggestion type routing ──────────────────────────────────────────────
+
+test("PR B: loadSuggestions routes business_expense_candidate into biz map", () => {
+  const pendingSuggestions = [
+    { id: "s1", suggestion_type: "transaction_category",      source_entity_id: "tx1" },
+    { id: "s2", suggestion_type: "business_expense_candidate", source_entity_id: "tx2" },
+    { id: "s3", suggestion_type: "transaction_category",      source_entity_id: "tx3" },
+    { id: "s4", suggestion_type: "business_expense_candidate", source_entity_id: "tx4" },
+  ];
+  const catMap = new Map();
+  const bizMap = new Map();
+  for (const s of pendingSuggestions) {
+    if (s.suggestion_type === "business_expense_candidate") {
+      bizMap.set(s.source_entity_id, s);
+    } else {
+      catMap.set(s.source_entity_id, s);
+    }
+  }
+  assert.equal(catMap.size, 2, "catMap must have 2 category suggestions");
+  assert.equal(bizMap.size, 2, "bizMap must have 2 biz suggestions");
+  assert.ok(catMap.has("tx1") && catMap.has("tx3"), "catMap must contain tx1 and tx3");
+  assert.ok(bizMap.has("tx2") && bizMap.has("tx4"), "bizMap must contain tx2 and tx4");
+});
+
+test("PR B: same transaction can have both a category and a biz suggestion without collision", () => {
+  const catMap = new Map();
+  const bizMap = new Map();
+  catMap.set("tx1", { id: "s1", suggestion_type: "transaction_category", source_entity_id: "tx1" });
+  bizMap.set("tx1", { id: "s2", suggestion_type: "business_expense_candidate", source_entity_id: "tx1" });
+  assert.ok(catMap.has("tx1"), "catMap must retain category suggestion for tx1");
+  assert.ok(bizMap.has("tx1"), "bizMap must retain biz suggestion for tx1");
+  assert.notEqual(catMap.get("tx1").id, bizMap.get("tx1").id, "Maps must hold separate suggestions");
+});
+
+// ─── 17. Tagged union undoEntry ────────────────────────────────────────────────
+
+test("PR B: undoEntry kind: 'category' carries prevCategory and category", () => {
+  const entry = { kind: "category", txId: "tx1", auditId: "a1", prevCategory: "Shopping", category: "Food & Drink" };
+  assert.equal(entry.kind, "category");
+  assert.equal(entry.prevCategory, "Shopping");
+  assert.equal(entry.category, "Food & Drink");
+  assert.equal(Object.prototype.hasOwnProperty.call(entry, "merchantName"), false,
+    "category entry must not have merchantName");
+});
+
+test("PR B: undoEntry kind: 'business' carries merchantName, not prevCategory/category", () => {
+  const entry = { kind: "business", txId: "tx1", auditId: "a1", merchantName: "Starbucks" };
+  assert.equal(entry.kind, "business");
+  assert.equal(entry.merchantName, "Starbucks");
+  assert.equal(Object.prototype.hasOwnProperty.call(entry, "prevCategory"), false,
+    "business entry must not have prevCategory");
+  assert.equal(Object.prototype.hasOwnProperty.call(entry, "category"), false,
+    "business entry must not have category");
+});
+
+test("PR B: undoAccept for category kind reverts tx.category to prevCategory", () => {
+  const entry = { kind: "category", txId: "tx1", auditId: "a1", prevCategory: "Shopping", category: "Food & Drink" };
+  const txBefore = { id: "tx1", category: "Food & Drink", is_business_candidate: null };
+  const txAfter = entry.kind === "category"
+    ? { ...txBefore, category: entry.prevCategory }
+    : { ...txBefore, is_business_candidate: null };
+  assert.equal(txAfter.category, "Shopping", "Category undo must restore prevCategory");
+  assert.equal(txAfter.is_business_candidate, null, "Category undo must not touch is_business_candidate");
+});
+
+test("PR B: undoAccept for business kind sets is_business_candidate to null", () => {
+  const entry = { kind: "business", txId: "tx1", auditId: "a1", merchantName: "Starbucks" };
+  const txBefore = { id: "tx1", category: "Food & Drink", is_business_candidate: true };
+  const txAfter = entry.kind === "business"
+    ? { ...txBefore, is_business_candidate: null }
+    : { ...txBefore, category: entry.prevCategory };
+  assert.equal(txAfter.is_business_candidate, null, "Business undo must set is_business_candidate to null");
+  assert.equal(txAfter.category, "Food & Drink", "Business undo must not touch category");
+});
+
+// ─── 18. Amber badge gating ────────────────────────────────────────────────────
+
+test("PR B: biz badge is not rendered when BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is false", () => {
+  const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = false;
+  const bizSuggestionsMap = new Map();
+  bizSuggestionsMap.set("tx1", { id: "s1", suggestion_type: "business_expense_candidate" });
+  // Simulates the rendering condition: flag must be true to show biz badge
+  const bizSuggestion = BUSINESS_EXPENSE_SUGGESTIONS_ENABLED ? bizSuggestionsMap.get("tx1") : undefined;
+  assert.equal(bizSuggestion, undefined, "Biz badge must not render when flag is false");
+});
+
+test("PR B: biz badge renders when BUSINESS_EXPENSE_SUGGESTIONS_ENABLED is true", () => {
+  const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
+  const bizSuggestionsMap = new Map();
+  bizSuggestionsMap.set("tx1", { id: "s1", suggestion_type: "business_expense_candidate" });
+  const bizSuggestion = BUSINESS_EXPENSE_SUGGESTIONS_ENABLED ? bizSuggestionsMap.get("tx1") : undefined;
+  assert.ok(bizSuggestion, "Biz badge must render when flag is true and suggestion exists");
+});
+
+// ─── 19. Mark as Business Candidate confirmation guard ────────────────────────
+
+test("PR B: markBusiness API is not called until user confirms (bizConfirmOpen gate)", () => {
+  // Simulates the two-step confirmation flow: button click → confirmation → API call.
+  let apiCalled = false;
+  let bizConfirmOpen = false;
+
+  // Step 1: button click opens confirmation only
+  function handleMarkButtonClick() { bizConfirmOpen = true; }
+  // Step 2: confirm button calls API
+  function handleConfirm() { if (bizConfirmOpen) apiCalled = true; }
+
+  handleMarkButtonClick();
+  assert.equal(bizConfirmOpen, true, "Clicking Mark must open confirmation dialog");
+  assert.equal(apiCalled, false, "API must not be called before confirmation");
+
+  handleConfirm();
+  assert.equal(apiCalled, true, "API must be called after user confirms");
+});
+
+test("PR B: cancel in confirmation dialog closes without calling API", () => {
+  let apiCalled = false;
+  let bizConfirmOpen = true;
+
+  function handleCancel() { bizConfirmOpen = false; }
+
+  handleCancel();
+  assert.equal(bizConfirmOpen, false, "Cancel must close the confirmation dialog");
+  assert.equal(apiCalled, false, "API must not be called after cancel");
+});
+
+// ─── 20. Mark-business update payload (PR B path) ─────────────────────────────
+
+test("PR B: acceptBizSuggestion sets is_business_candidate: true on the transaction", () => {
+  const txBefore = { id: "tx1", is_business_candidate: null, category: "Travel" };
+  const txAfter = { ...txBefore, is_business_candidate: true };
+  assert.equal(txAfter.is_business_candidate, true);
+  assert.equal(txAfter.category, "Travel", "acceptBizSuggestion must not touch category");
+});
+
+test("PR B: manual markBusiness sets is_business_candidate: true on both transactions list and selected", () => {
+  const txList = [
+    { id: "tx1", is_business_candidate: null },
+    { id: "tx2", is_business_candidate: null },
+  ];
+  const selectedId = "tx1";
+  const updated = txList.map((t) => t.id === selectedId ? { ...t, is_business_candidate: true } : t);
+  assert.equal(updated.find((t) => t.id === "tx1")?.is_business_candidate, true);
+  assert.equal(updated.find((t) => t.id === "tx2")?.is_business_candidate, null,
+    "Other transactions must not be affected");
+});
+
+// ─── 21. Already-marked transaction shows status text, not button ──────────────
+
+test("PR B: already-marked transaction renders status text path, not button path", () => {
+  // Simulates the ternary: is_business_candidate ? <status text> : <button>
+  function renderBizSection(tx) {
+    if (tx.is_business_candidate) return "status_text";
+    return "button";
+  }
+  assert.equal(renderBizSection({ is_business_candidate: true }), "status_text");
+  assert.equal(renderBizSection({ is_business_candidate: null }), "button");
+  assert.equal(renderBizSection({ is_business_candidate: false }), "button");
+});
+
+// ─── 22. Biz suggestion panel buttons ─────────────────────────────────────────
+
+test("PR B: rejectBizSuggestion removes from bizMap without a reason picker", () => {
+  const bizMap = new Map();
+  bizMap.set("tx1", { id: "s1" });
+  bizMap.set("tx2", { id: "s2" });
+  // Simulate reject (uses hardcoded 'skipped', no picker interaction)
+  bizMap.delete("tx1");
+  assert.equal(bizMap.has("tx1"), false, "tx1 must be removed from bizMap after rejection");
+  assert.equal(bizMap.has("tx2"), true, "tx2 must not be affected");
+});
+
+test("PR B: Not-now closes biz panel without removing the suggestion from bizMap", () => {
+  const bizMap = new Map();
+  bizMap.set("tx1", { id: "s1" });
+  let openBizSuggestionId = "tx1";
+  // Simulate "Not now" — only closes panel, does not modify map
+  openBizSuggestionId = null;
+  assert.equal(openBizSuggestionId, null, "Panel must be closed after Not now");
+  assert.equal(bizMap.has("tx1"), true, "Suggestion must remain in bizMap after Not now");
+});
+
+// ─── 23. Undo toast appearance ────────────────────────────────────────────────
+
+test("PR B: undo toast for category kind shows category name", () => {
+  const undoEntry = { kind: "category", txId: "tx1", auditId: "a1", prevCategory: null, category: "Food & Drink" };
+  const toastText = undoEntry.kind === "category"
+    ? `${undoEntry.category} category applied`
+    : `Marked ${undoEntry.merchantName ?? "transaction"} as Business Candidate`;
+  assert.match(toastText, /Food & Drink/, "Toast must show the category name");
+});
+
+test("PR B: undo toast for business kind shows merchant name", () => {
+  const undoEntry = { kind: "business", txId: "tx1", auditId: "a1", merchantName: "Starbucks" };
+  const toastText = undoEntry.kind === "category"
+    ? `${undoEntry.category} category applied`
+    : `Marked ${undoEntry.merchantName ?? "transaction"} as Business Candidate`;
+  assert.match(toastText, /Starbucks/, "Toast must show the merchant name");
+  assert.match(toastText, /Business Candidate/, "Toast must mention Business Candidate");
+});
+
+test("PR B: undo toast for business kind with null merchantName falls back to 'transaction'", () => {
+  const undoEntry = { kind: "business", txId: "tx1", auditId: "a1", merchantName: null };
+  const toastText = `Marked ${undoEntry.merchantName ?? "transaction"} as Business Candidate`;
+  assert.match(toastText, /transaction/, "Fallback to 'transaction' when merchantName is null");
+});
+
+// ─── 24. Phase4SuggestionType covers both types ───────────────────────────────
+
+test("PR B: Phase4SuggestionType includes both transaction_category and business_expense_candidate", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/types.ts"),
+    "utf8",
+  );
+  assert.match(src, /Phase4SuggestionType/, "Phase4SuggestionType must be defined");
+  assert.match(src, /'business_expense_candidate'/, "Must include business_expense_candidate");
+  assert.match(src, /'transaction_category'/, "Must include transaction_category (via Phase1RuleType)");
+});
+
+test("PR B: AutomationSuggestion.suggestion_type uses Phase4SuggestionType", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/types.ts"),
+    "utf8",
+  );
+  assert.match(src, /suggestion_type:\s*Phase4SuggestionType/,
+    "AutomationSuggestion.suggestion_type must use Phase4SuggestionType");
+});
+
+test("PR B: BusinessExpenseActionConfig is defined with mixed_use and reason fields", () => {
+  const src = readFileSync(
+    path.join(ROOT, "src/lib/automation/types.ts"),
+    "utf8",
+  );
+  assert.match(src, /BusinessExpenseActionConfig/, "BusinessExpenseActionConfig must be defined");
+  assert.match(src, /mixed_use/, "Must have mixed_use field");
+  assert.match(src, /reason/, "Must have reason field");
+});

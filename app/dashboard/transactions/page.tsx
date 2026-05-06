@@ -5,7 +5,7 @@ import { createClient } from "../../../src/lib/supabase";
 import { activePostedTransactions, deduplicateTransactions, calcTotalIn, calcTotalOut } from "../../../src/lib/financialCalculations";
 import { getCanonicalDeduplicatedTransactions } from "../../../src/lib/canonicalFinancialData";
 import type { AutomationSuggestion } from "../../../src/lib/automation/types";
-import { SENSITIVE_CATEGORIES } from "../../../src/lib/automation/constants";
+import { SENSITIVE_CATEGORIES, BUSINESS_EXPENSE_SUGGESTIONS_ENABLED, MIXED_USE_CATEGORIES } from "../../../src/lib/automation/constants";
 
 interface Transaction {
   id: string;
@@ -24,6 +24,7 @@ interface Transaction {
   provider: string | null;
   external_transaction_id: string | null;
   deleted_at: string | null;
+  is_business_candidate: boolean | null;
 }
 
 interface Account {
@@ -149,15 +150,25 @@ export default function TransactionsPage() {
   const [editType, setEditType] = useState("");
   const [editCategory, setEditCategory] = useState("");
   const [panelMsg, setPanelMsg] = useState<string | null>(null);
-  // Automation suggestions keyed by transaction id
-  const [suggestions, setSuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
+  // Automation suggestions keyed by transaction id, split by type
+  const [categorySuggestions, setCategorySuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
+  const [bizSuggestions, setBizSuggestions] = useState<Map<string, AutomationSuggestion>>(new Map());
   // Which suggestion panel is open (by transaction id)
   const [openSuggestion, setOpenSuggestion] = useState<string | null>(null);
+  const [openBizSuggestionId, setOpenBizSuggestionId] = useState<string | null>(null);
   // Ephemeral undo entry — lost on page refresh (intentional)
-  const [undoEntry, setUndoEntry] = useState<{ txId: string; auditId: string; prevCategory: string | null; category: string } | null>(null);
-  // Which transaction's suggestion is in the reason-picker step
+  const [undoEntry, setUndoEntry] = useState<
+    | { kind: "category"; txId: string; auditId: string; prevCategory: string | null; category: string }
+    | { kind: "business"; txId: string; auditId: string; merchantName: string | null }
+    | null
+  >(null);
+  // Which transaction's category suggestion is in the reason-picker step
   const [rejectingTxId, setRejectingTxId] = useState<string | null>(null);
   const [rejectError, setRejectError] = useState<string | null>(null);
+  // Business candidate manual mark state
+  const [bizConfirmOpen, setBizConfirmOpen] = useState(false);
+  const [markingBusiness, setMarkingBusiness] = useState(false);
+  const [bizMarkError, setBizMarkError] = useState<string | null>(null);
 
   useEffect(() => { loadData(); }, []);
 
@@ -187,11 +198,17 @@ export default function TransactionsPage() {
       const res = await fetch("/api/automation/suggestions");
       if (!res.ok) return;
       const { suggestions: data } = await res.json();
-      const map = new Map<string, AutomationSuggestion>();
+      const catMap = new Map<string, AutomationSuggestion>();
+      const bizMap = new Map<string, AutomationSuggestion>();
       for (const s of (data ?? [])) {
-        map.set(s.source_entity_id, s);
+        if (s.suggestion_type === "business_expense_candidate") {
+          bizMap.set(s.source_entity_id, s);
+        } else {
+          catMap.set(s.source_entity_id, s);
+        }
       }
-      setSuggestions(map);
+      setCategorySuggestions(catMap);
+      setBizSuggestions(bizMap);
     } catch {
       // Suggestions are non-critical; silent fail is acceptable
     }
@@ -222,6 +239,8 @@ export default function TransactionsPage() {
     setEditType(tx.transaction_type);
     setEditCategory(tx.category ?? "");
     setPanelMsg(null);
+    setBizConfirmOpen(false);
+    setBizMarkError(null);
   };
 
   const saveChanges = async () => {
@@ -355,29 +374,52 @@ export default function TransactionsPage() {
     setTransactions((prev) =>
       prev.map((t) => (t.id === txId ? { ...t, category } : t))
     );
-    setSuggestions((prev) => {
+    setCategorySuggestions((prev) => {
       const next = new Map(prev);
       next.delete(txId);
       return next;
     });
     setOpenSuggestion(null);
     if (auditId) {
-      setUndoEntry({ txId, auditId, prevCategory, category });
+      setUndoEntry({ kind: "category", txId, auditId, prevCategory, category });
+    }
+  };
+
+  const acceptBizSuggestion = async (suggestionId: string, txId: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/accept`, { method: "POST" });
+    if (!res.ok) return;
+    const resData = await res.json().catch(() => ({}));
+    const auditId: string | null = resData.auditId ?? null;
+    const merchantName = transactions.find((t) => t.id === txId)?.merchant_name ?? null;
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === txId ? { ...t, is_business_candidate: true } : t))
+    );
+    setBizSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenBizSuggestionId(null);
+    if (auditId) {
+      setUndoEntry({ kind: "business", txId, auditId, merchantName });
     }
   };
 
   const undoAccept = async () => {
     if (!undoEntry) return;
-    const { txId, auditId, prevCategory } = undoEntry;
+    const entry = undoEntry;
     setUndoEntry(null);
-    const res = await fetch(`/api/automation/audit/${auditId}/undo`, { method: "POST" });
-    if (res.ok) {
+    const res = await fetch(`/api/automation/audit/${entry.auditId}/undo`, { method: "POST" });
+    if (!res.ok) return;
+    if (entry.kind === "category") {
       setTransactions((prev) =>
-        prev.map((t) => (t.id === txId ? { ...t, category: prevCategory } : t))
+        prev.map((t) => (t.id === entry.txId ? { ...t, category: entry.prevCategory } : t))
+      );
+    } else {
+      setTransactions((prev) =>
+        prev.map((t) => (t.id === entry.txId ? { ...t, is_business_candidate: null } : t))
       );
     }
-    // 409 = stale (transaction was changed since accept) — silently drop undo option
-    // other errors — undo is best-effort, no recovery needed
   };
 
   const rejectSuggestion = async (suggestionId: string, txId: string, reason: string) => {
@@ -391,7 +433,7 @@ export default function TransactionsPage() {
       setRejectError("Failed to reject. Please try again.");
       return;
     }
-    setSuggestions((prev) => {
+    setCategorySuggestions((prev) => {
       const next = new Map(prev);
       next.delete(txId);
       return next;
@@ -399,6 +441,45 @@ export default function TransactionsPage() {
     setRejectingTxId(null);
     setRejectError(null);
     setOpenSuggestion(null);
+  };
+
+  const rejectBizSuggestion = async (suggestionId: string, txId: string) => {
+    const res = await fetch(`/api/automation/suggestions/${suggestionId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rejection_reason: "skipped" }),
+    });
+    if (!res.ok) return;
+    setBizSuggestions((prev) => {
+      const next = new Map(prev);
+      next.delete(txId);
+      return next;
+    });
+    setOpenBizSuggestionId(null);
+  };
+
+  const markBusiness = async () => {
+    if (!selected) return;
+    setMarkingBusiness(true);
+    setBizMarkError(null);
+    const res = await fetch(`/api/automation/transactions/${selected.id}/mark-business`, { method: "POST" });
+    if (!res.ok) {
+      setBizMarkError("Failed to mark. Please try again.");
+      setMarkingBusiness(false);
+      return;
+    }
+    const resData = await res.json().catch(() => ({}));
+    const auditId: string | null = resData.auditId ?? null;
+    const merchantName = selected.merchant_name ?? null;
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === selected.id ? { ...t, is_business_candidate: true } : t))
+    );
+    setSelected((prev) => (prev ? { ...prev, is_business_candidate: true } : null));
+    setBizConfirmOpen(false);
+    setMarkingBusiness(false);
+    if (auditId) {
+      setUndoEntry({ kind: "business", txId: selected.id, auditId, merchantName });
+    }
   };
 
   function confidenceTier(confidence: number): string {
@@ -488,18 +569,24 @@ export default function TransactionsPage() {
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
             gap: "12px", padding: "10px 14px", marginBottom: "12px",
-            background: "rgba(99,102,241,0.08)",
-            border: "1px solid rgba(99,102,241,0.25)",
+            background: undoEntry.kind === "business" ? "rgba(245,158,11,0.08)" : "rgba(99,102,241,0.08)",
+            border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.3)" : "rgba(99,102,241,0.25)"}`,
             borderRadius: "9px",
           }}>
             <span style={{ fontSize: "12px", color: "#94a3b8" }}>
-              Categorized as <strong style={{ color: "#e2e8f0" }}>{undoEntry.category}</strong>
+              {undoEntry.kind === "category"
+                ? <><strong style={{ color: "#e2e8f0" }}>{undoEntry.category}</strong> category applied</>
+                : <>Marked <strong style={{ color: "#e2e8f0" }}>{undoEntry.merchantName ?? "transaction"}</strong> as Business Candidate</>
+              }
             </span>
             <div style={{ display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 }}>
               <button onClick={undoAccept} style={{
                 padding: "4px 12px", fontSize: "11px", fontWeight: 600,
-                background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.4)",
-                borderRadius: "6px", color: "#818cf8", cursor: "pointer",
+                background: undoEntry.kind === "business" ? "rgba(245,158,11,0.15)" : "rgba(99,102,241,0.2)",
+                border: `1px solid ${undoEntry.kind === "business" ? "rgba(245,158,11,0.4)" : "rgba(99,102,241,0.4)"}`,
+                borderRadius: "6px",
+                color: undoEntry.kind === "business" ? "#f59e0b" : "#818cf8",
+                cursor: "pointer",
               }}>
                 Undo
               </button>
@@ -526,8 +613,11 @@ export default function TransactionsPage() {
               const account = getAccount(tx.financial_account_id);
               const isSelected = selected?.id === tx.id;
               const isCredit = tx.direction === "credit";
-              const suggestion = suggestions.get(tx.id);
-              const suggestionOpen = openSuggestion === tx.id;
+              const catSuggestion = categorySuggestions.get(tx.id);
+              const bizSuggestion = BUSINESS_EXPENSE_SUGGESTIONS_ENABLED ? bizSuggestions.get(tx.id) : undefined;
+              const catSuggestionOpen = openSuggestion === tx.id;
+              const bizSuggestionOpen = openBizSuggestionId === tx.id;
+              const anyPanelOpen = catSuggestionOpen || bizSuggestionOpen;
               return (
                 <div key={tx.id} style={{ display: "flex", flexDirection: "column", gap: "0" }}>
                   <div onClick={() => openPanel(tx)}
@@ -536,7 +626,7 @@ export default function TransactionsPage() {
                       padding: "13px 16px",
                       background: isSelected ? "rgba(37,99,235,0.08)" : "rgba(255,255,255,0.02)",
                       border: `1px solid ${isSelected ? "rgba(37,99,235,0.25)" : "rgba(255,255,255,0.04)"}`,
-                      borderRadius: suggestion && suggestionOpen ? "10px 10px 0 0" : "10px",
+                      borderRadius: anyPanelOpen ? "10px 10px 0 0" : "10px",
                       cursor: "pointer", transition: "all 0.15s ease",
                     }}
                     onMouseEnter={(e) => { if (!isSelected) { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; e.currentTarget.style.borderColor = "rgba(255,255,255,0.08)"; } }}
@@ -579,9 +669,9 @@ export default function TransactionsPage() {
                             pending
                           </span>
                         )}
-                        {suggestion && (
+                        {catSuggestion && (
                           <button
-                            onClick={(e) => { e.stopPropagation(); setOpenSuggestion(suggestionOpen ? null : tx.id); if (suggestionOpen) { setRejectingTxId(null); setRejectError(null); } }}
+                            onClick={(e) => { e.stopPropagation(); setOpenSuggestion(catSuggestionOpen ? null : tx.id); if (catSuggestionOpen) { setRejectingTxId(null); setRejectError(null); } }}
                             style={{
                               fontSize: "10px", fontWeight: 600, color: "#818cf8",
                               background: "rgba(99,102,241,0.12)",
@@ -591,6 +681,20 @@ export default function TransactionsPage() {
                             }}
                           >
                             Suggestion
+                          </button>
+                        )}
+                        {bizSuggestion && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenBizSuggestionId(bizSuggestionOpen ? null : tx.id); }}
+                            style={{
+                              fontSize: "10px", fontWeight: 600, color: "#f59e0b",
+                              background: "rgba(245,158,11,0.1)",
+                              padding: "1px 8px", borderRadius: "99px",
+                              border: "1px solid rgba(245,158,11,0.3)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Biz?
                           </button>
                         )}
                       </div>
@@ -606,85 +710,149 @@ export default function TransactionsPage() {
                     </div>
                   </div>
 
-                  {/* Suggestion inline panel */}
-                  {suggestion && suggestionOpen && (
-                    <div style={{
-                      padding: "12px 16px",
-                      background: "rgba(99,102,241,0.06)",
-                      border: "1px solid rgba(99,102,241,0.2)",
-                      borderTop: "none",
-                      borderRadius: "0 0 10px 10px",
-                    }}>
-                      <div style={{ fontSize: "11px", color: "#818cf8", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
-                        SUGGESTED CATEGORY
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: "13px", fontWeight: 600, color: "#e2e8f0" }}>
-                          {suggestion.suggested_action.category}
-                        </span>
-                        <span style={{
-                          fontSize: "10px", color: "#64748b",
-                          background: "rgba(255,255,255,0.04)",
-                          padding: "1px 7px", borderRadius: "99px",
-                          border: "1px solid rgba(255,255,255,0.07)",
-                        }}>
-                          {confidenceTier(suggestion.confidence)} confidence
-                        </span>
-                      </div>
-                      {suggestion.reason && (
-                        <div style={{ fontSize: "11px", color: "#475569", marginTop: "4px" }}>
-                          {suggestion.reason}
+                  {/* Category suggestion inline panel */}
+                  {catSuggestion && catSuggestionOpen && (() => {
+                    const catAction = catSuggestion.suggested_action as { category: string; reason?: string };
+                    return (
+                      <div style={{
+                        padding: "12px 16px",
+                        background: "rgba(99,102,241,0.06)",
+                        border: "1px solid rgba(99,102,241,0.2)",
+                        borderTop: "none",
+                        borderRadius: bizSuggestion && bizSuggestionOpen ? "0 0 0 0" : "0 0 10px 10px",
+                      }}>
+                        <div style={{ fontSize: "11px", color: "#818cf8", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
+                          SUGGESTED CATEGORY
                         </div>
-                      )}
-                      {rejectingTxId === tx.id ? (
-                        <div style={{ marginTop: "10px" }}>
-                          <div style={{ fontSize: "10px", fontWeight: 700, color: "#475569", letterSpacing: "0.08em", marginBottom: "7px" }}>
-                            WHY ARE YOU REJECTING THIS?
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: "13px", fontWeight: 600, color: "#e2e8f0" }}>
+                            {catAction.category}
+                          </span>
+                          <span style={{
+                            fontSize: "10px", color: "#64748b",
+                            background: "rgba(255,255,255,0.04)",
+                            padding: "1px 7px", borderRadius: "99px",
+                            border: "1px solid rgba(255,255,255,0.07)",
+                          }}>
+                            {confidenceTier(catSuggestion.confidence)} confidence
+                          </span>
+                        </div>
+                        {catSuggestion.reason && (
+                          <div style={{ fontSize: "11px", color: "#475569", marginTop: "4px" }}>
+                            {catSuggestion.reason}
                           </div>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                            {([
-                              { reason: "wrong_merchant",    label: "Wrong merchant" },
-                              { reason: "wrong_category",    label: "Wrong category" },
-                              { reason: "not_recurring",     label: "Not recurring" },
-                              { reason: "personal_preference", label: "Personal preference" },
-                              { reason: "other",             label: "Other" },
-                              { reason: "skipped",           label: "Skip" },
-                            ] as const).map(({ reason, label }) => (
-                              <button
-                                key={reason}
-                                onClick={(e) => { e.stopPropagation(); rejectSuggestion(suggestion.id, tx.id, reason); }}
-                                style={{
-                                  padding: "5px 11px", fontSize: "11px", fontWeight: 500,
-                                  background: "rgba(255,255,255,0.04)",
-                                  border: "1px solid rgba(255,255,255,0.1)",
-                                  borderRadius: "7px", color: "#94a3b8", cursor: "pointer",
-                                }}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          {rejectError && (
-                            <div style={{ marginTop: "8px", fontSize: "11px", color: "#ef4444" }}>
-                              {rejectError}
+                        )}
+                        {rejectingTxId === tx.id ? (
+                          <div style={{ marginTop: "10px" }}>
+                            <div style={{ fontSize: "10px", fontWeight: 700, color: "#475569", letterSpacing: "0.08em", marginBottom: "7px" }}>
+                              WHY ARE YOU REJECTING THIS?
                             </div>
-                          )}
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                              {([
+                                { reason: "wrong_merchant",    label: "Wrong merchant" },
+                                { reason: "wrong_category",    label: "Wrong category" },
+                                { reason: "not_recurring",     label: "Not recurring" },
+                                { reason: "personal_preference", label: "Personal preference" },
+                                { reason: "other",             label: "Other" },
+                                { reason: "skipped",           label: "Skip" },
+                              ] as const).map(({ reason, label }) => (
+                                <button
+                                  key={reason}
+                                  onClick={(e) => { e.stopPropagation(); rejectSuggestion(catSuggestion.id, tx.id, reason); }}
+                                  style={{
+                                    padding: "5px 11px", fontSize: "11px", fontWeight: 500,
+                                    background: "rgba(255,255,255,0.04)",
+                                    border: "1px solid rgba(255,255,255,0.1)",
+                                    borderRadius: "7px", color: "#94a3b8", cursor: "pointer",
+                                  }}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                            {rejectError && (
+                              <div style={{ marginTop: "8px", fontSize: "11px", color: "#ef4444" }}>
+                                {rejectError}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); acceptSuggestion(catSuggestion.id, tx.id, catAction.category); }}
+                              style={{
+                                padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                                background: "rgba(99,102,241,0.2)",
+                                border: "1px solid rgba(99,102,241,0.4)",
+                                borderRadius: "7px", color: "#818cf8", cursor: "pointer",
+                              }}
+                            >
+                              Accept
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setRejectingTxId(tx.id); setRejectError(null); }}
+                              style={{
+                                padding: "6px 14px", fontSize: "12px", fontWeight: 600,
+                                background: "transparent",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                borderRadius: "7px", color: "#475569", cursor: "pointer",
+                              }}
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Business candidate suggestion inline panel */}
+                  {bizSuggestion && bizSuggestionOpen && (() => {
+                    const bizAction = bizSuggestion.suggested_action as { mixed_use?: boolean; reason?: string };
+                    const isMixedUse = bizAction.mixed_use === true;
+                    return (
+                      <div style={{
+                        padding: "12px 16px",
+                        background: "rgba(245,158,11,0.06)",
+                        border: "1px solid rgba(245,158,11,0.2)",
+                        borderTop: "none",
+                        borderRadius: "0 0 10px 10px",
+                      }}>
+                        <div style={{ fontSize: "11px", color: "#f59e0b", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.06em" }}>
+                          BUSINESS EXPENSE CANDIDATE
                         </div>
-                      ) : (
-                        <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+                        <div style={{ fontSize: "11px", color: "#64748b", marginBottom: "8px" }}>
+                          This transaction may be a business expense. Marking it does not affect tax calculations or deductions.
+                        </div>
+                        {isMixedUse && (
+                          <div style={{
+                            fontSize: "11px", color: "#f59e0b",
+                            background: "rgba(245,158,11,0.08)",
+                            border: "1px solid rgba(245,158,11,0.2)",
+                            borderRadius: "6px", padding: "6px 10px", marginBottom: "8px",
+                          }}>
+                            Mixed-use expense: this category is sometimes personal, sometimes business.
+                          </div>
+                        )}
+                        {bizSuggestion.reason && (
+                          <div style={{ fontSize: "11px", color: "#475569", marginBottom: "8px" }}>
+                            {bizSuggestion.reason}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
                           <button
-                            onClick={(e) => { e.stopPropagation(); acceptSuggestion(suggestion.id, tx.id, suggestion.suggested_action.category); }}
+                            onClick={(e) => { e.stopPropagation(); acceptBizSuggestion(bizSuggestion.id, tx.id); }}
                             style={{
                               padding: "6px 14px", fontSize: "12px", fontWeight: 600,
-                              background: "rgba(99,102,241,0.2)",
-                              border: "1px solid rgba(99,102,241,0.4)",
-                              borderRadius: "7px", color: "#818cf8", cursor: "pointer",
+                              background: "rgba(245,158,11,0.15)",
+                              border: "1px solid rgba(245,158,11,0.4)",
+                              borderRadius: "7px", color: "#f59e0b", cursor: "pointer",
                             }}
                           >
-                            Accept
+                            Confirm Business Candidate
                           </button>
                           <button
-                            onClick={(e) => { e.stopPropagation(); setRejectingTxId(tx.id); setRejectError(null); }}
+                            onClick={(e) => { e.stopPropagation(); rejectBizSuggestion(bizSuggestion.id, tx.id); }}
                             style={{
                               padding: "6px 14px", fontSize: "12px", fontWeight: 600,
                               background: "transparent",
@@ -694,10 +862,20 @@ export default function TransactionsPage() {
                           >
                             Reject
                           </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenBizSuggestionId(null); }}
+                            style={{
+                              padding: "6px 12px", fontSize: "12px", fontWeight: 500,
+                              background: "transparent", border: "none",
+                              borderRadius: "7px", color: "#334155", cursor: "pointer",
+                            }}
+                          >
+                            Not now
+                          </button>
                         </div>
-                      )}
-                    </div>
-                  )}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
@@ -825,6 +1003,76 @@ export default function TransactionsPage() {
                 Tagging as income affects your tax estimates.
               </p>
             </div>
+
+            {/* Business Candidate */}
+            {selected.is_business_candidate ? (
+              <div style={{
+                padding: "10px 12px", marginBottom: "12px",
+                background: "rgba(245,158,11,0.08)",
+                border: "1px solid rgba(245,158,11,0.2)",
+                borderRadius: "8px",
+                fontSize: "12px", color: "#f59e0b", fontWeight: 600,
+                textAlign: "center",
+              }}>
+                Business Candidate
+              </div>
+            ) : bizConfirmOpen ? (
+              <div style={{
+                padding: "12px", marginBottom: "12px",
+                background: "rgba(245,158,11,0.06)",
+                border: "1px solid rgba(245,158,11,0.2)",
+                borderRadius: "8px",
+              }}>
+                <div style={{ fontSize: "11px", color: "#94a3b8", marginBottom: "8px" }}>
+                  Marking as a business candidate is for your review only. It does not affect tax calculations, deductions, or write-offs.
+                </div>
+                {MIXED_USE_CATEGORIES.has((selected.category ?? "").toLowerCase()) && (
+                  <div style={{ fontSize: "11px", color: "#f59e0b", marginBottom: "8px" }}>
+                    Mixed-use category: may be personal or business.
+                  </div>
+                )}
+                {bizMarkError && (
+                  <div style={{ fontSize: "11px", color: "#ef4444", marginBottom: "8px" }}>{bizMarkError}</div>
+                )}
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button onClick={markBusiness} disabled={markingBusiness}
+                    style={{
+                      flex: 1, padding: "8px", fontSize: "12px", fontWeight: 600,
+                      background: "rgba(245,158,11,0.15)",
+                      border: "1px solid rgba(245,158,11,0.4)",
+                      borderRadius: "7px", color: "#f59e0b",
+                      cursor: markingBusiness ? "not-allowed" : "pointer",
+                      opacity: markingBusiness ? 0.7 : 1,
+                    }}>
+                    {markingBusiness ? "Marking..." : "Confirm"}
+                  </button>
+                  <button onClick={() => { setBizConfirmOpen(false); setBizMarkError(null); }}
+                    style={{
+                      padding: "8px 14px", fontSize: "12px", fontWeight: 500,
+                      background: "transparent",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: "7px", color: "#475569", cursor: "pointer",
+                    }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setBizConfirmOpen(true)}
+                style={{
+                  width: "100%", padding: "10px", marginBottom: "10px",
+                  background: "transparent",
+                  border: "1px solid rgba(245,158,11,0.25)",
+                  borderRadius: "9px", color: "#f59e0b",
+                  fontSize: "13px", fontWeight: 600,
+                  cursor: "pointer", transition: "all 0.15s ease",
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "rgba(245,158,11,0.06)"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+              >
+                Mark as Business Candidate
+              </button>
+            )}
 
             {/* Save */}
             <button onClick={saveChanges} disabled={saving}
