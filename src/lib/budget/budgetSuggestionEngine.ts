@@ -144,15 +144,17 @@ export async function generateAndStoreBudgetSuggestions(
     (pendingRows ?? []).map((r: { category: string }) => r.category.toLowerCase()),
   );
 
-  // Fetch existing accepted suggestions to avoid re-suggesting confirmed limits.
-  const { data: acceptedRows } = await supabase
+  // Fetch accepted and rejected suggestions to avoid re-suggesting resolved categories.
+  // Rejected suggestions are suppressed the same as accepted — the user has already
+  // given a signal (wrong amount, already budgeted, or skipped) that they don't want this.
+  const { data: resolvedRows } = await supabase
     .from("budget_suggestions")
     .select("category")
     .eq("user_id", userId)
-    .eq("status", "accepted");
+    .in("status", ["accepted", "rejected"]);
 
   const existingAcceptedCategories = new Set(
-    (acceptedRows ?? []).map((r: { category: string }) => r.category.toLowerCase()),
+    (resolvedRows ?? []).map((r: { category: string }) => r.category.toLowerCase()),
   );
 
   const candidates = buildBudgetSuggestions(byMonth, existingPendingCategories, existingAcceptedCategories);

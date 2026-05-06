@@ -1,24 +1,27 @@
 import { NextResponse } from "next/server";
 import { createRouteClient } from "../../../../src/lib/automation/serverSupabase";
 import { BUDGET_AUTOMATION_ENABLED } from "../../../../src/lib/automation/constants";
+import { generateAndStoreBudgetSuggestions } from "../../../../src/lib/budget/budgetSuggestionEngine";
 
-// Read-only budget suggestions endpoint.
-// Returns empty while BUDGET_AUTOMATION_ENABLED is false (PR A).
-// When enabled (PR B), returns pending budget suggestions for the authenticated user.
+// Budget suggestions endpoint.
+// Returns empty while BUDGET_AUTOMATION_ENABLED is false.
+// When enabled: generates + deduplicates suggestions from historical spending,
+// then returns all pending suggestions for the authenticated user.
 //
-// Never writes to: transactions, accounts, budgets, tax values, or any financial field.
+// Never writes to: transactions, accounts, tax values, or any financial field.
+// Writes only to: budget_suggestions (via generateAndStoreBudgetSuggestions).
 // User isolation: explicit user_id filter + RLS on budget_suggestions table.
 
 export async function GET() {
   const { supabase, userId } = await createRouteClient();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Flag guard: return empty list while budget automation is not yet enabled.
-  // Generation is not wired until PR B — this prevents empty table queries
-  // from surfacing partial state during the foundation phase.
   if (!BUDGET_AUTOMATION_ENABLED) {
     return NextResponse.json({ suggestions: [] });
   }
+
+  // Generate and store new suggestions (idempotent — dedup index prevents duplicates).
+  await generateAndStoreBudgetSuggestions(userId, supabase);
 
   const { data: suggestions, error } = await supabase
     .from("budget_suggestions")
