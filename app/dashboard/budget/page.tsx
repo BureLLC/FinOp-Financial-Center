@@ -47,6 +47,17 @@ interface EnvelopeTx {
   created_at: string;
 }
 
+interface BudgetSuggestion {
+  id: string;
+  category: string;
+  suggested_amount: number;
+  avg_monthly_spend: number;
+  basis_months: number;
+  confidence: number;
+  reason: string;
+  status: string;
+}
+
 const CATEGORY_ICONS: Record<string, { icon: string; color: string; rgb: string }> = {
   "gas":         { icon: "⛽", color: "#f97316", rgb: "249,115,22" },
   "fuel":        { icon: "⛽", color: "#f97316", rgb: "249,115,22" },
@@ -177,6 +188,14 @@ export default function BudgetPage() {
   const [loading, setLoading] = useState(true);
   const [selectedEnvelope, setSelectedEnvelope] = useState<Envelope | null>(null);
 
+  // Budget suggestions
+  const [suggestions, setSuggestions] = useState<BudgetSuggestion[]>([]);
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [rejectSuggestion, setRejectSuggestion] = useState<BudgetSuggestion | null>(null);
+  const [rejectReason, setRejectReason] = useState<string>("");
+  const [rejectingSaving, setRejectingSaving] = useState(false);
+
   // Category modals
   const [showAddCategory, setShowAddCategory] = useState(false);
   const [newCatName, setNewCatName] = useState("");
@@ -234,6 +253,10 @@ export default function BudgetPage() {
     setRecords(recRes.data ?? []);
     setEnvelopes(envRes.data ?? []);
     setEnvelopeTxs(envTxRes.data ?? []);
+
+    const sugRes = await fetch("/api/budget/suggestions").catch(() => null);
+    const sugData = sugRes?.ok ? await sugRes.json().catch(() => ({ suggestions: [] })) : { suggestions: [] };
+    setSuggestions(sugData.suggestions ?? []);
     setLoading(false);
   };
 
@@ -474,6 +497,36 @@ export default function BudgetPage() {
 
   const getEnvelopeTxs = (envId: string) => envelopeTxs.filter((t) => t.envelope_id === envId);
 
+  const visibleSuggestions = suggestions.filter((s) => !dismissedIds.has(s.id));
+
+  const handleAcceptSuggestion = async (sug: BudgetSuggestion) => {
+    setAcceptingId(sug.id);
+    const res = await fetch(`/api/budget/suggestions/${sug.id}/accept`, { method: "POST" }).catch(() => null);
+    setAcceptingId(null);
+    if (res?.ok) {
+      setSuggestions((prev) => prev.filter((s) => s.id !== sug.id));
+      await loadData();
+    }
+  };
+
+  const handleRejectSuggestion = async () => {
+    if (!rejectSuggestion) return;
+    setRejectingSaving(true);
+    const body: Record<string, string> = {};
+    if (rejectReason) body.rejection_reason = rejectReason;
+    const res = await fetch(`/api/budget/suggestions/${rejectSuggestion.id}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+    setRejectingSaving(false);
+    if (res?.ok) {
+      setSuggestions((prev) => prev.filter((s) => s.id !== rejectSuggestion.id));
+      setRejectSuggestion(null);
+      setRejectReason("");
+    }
+  };
+
   const inputStyle: React.CSSProperties = {
     width: "100%", padding: "10px 14px",
     background: "rgba(255,255,255,0.04)",
@@ -518,6 +571,82 @@ export default function BudgetPage() {
           ✉️ Envelope System
         </button>
       </div>
+
+      {/* ── BUDGET SUGGESTIONS ── */}
+      {visibleSuggestions.length > 0 && (
+        <div style={{ marginBottom: "28px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
+            <div style={{ fontSize: "10px", fontWeight: 700, color: "#334155", letterSpacing: "0.12em" }}>
+              BUDGET SUGGESTIONS ({visibleSuggestions.length})
+            </div>
+          </div>
+          <div style={{ fontSize: "11px", color: "#475569", marginBottom: "16px", lineHeight: 1.6 }}>
+            Based on your past spending — no money is moved and your transactions are not changed.
+            Accepting sets a monthly limit in your Budget Tracker.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "12px" }}>
+            {visibleSuggestions.map((sug) => {
+              const catStyle = getCategoryStyle(sug.category);
+              const isAccepting = acceptingId === sug.id;
+              const signalLabel = sug.confidence >= 0.75 ? "High confidence" : "Moderate confidence";
+              const signalColor = sug.confidence >= 0.75 ? "#22c55e" : "#f59e0b";
+              return (
+                <div key={sug.id} style={{ padding: "18px", background: "rgba(56,189,248,0.04)", border: "1px solid rgba(56,189,248,0.14)", borderRadius: "14px", position: "relative", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", top: "-24px", right: "-24px", width: "80px", height: "80px", borderRadius: "50%", background: `radial-gradient(circle, rgba(${catStyle.rgb},0.1) 0%, transparent 70%)`, pointerEvents: "none" }} />
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+                    <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: `rgba(${catStyle.rgb},0.18)`, border: `1px solid rgba(${catStyle.rgb},0.3)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "17px", flexShrink: 0 }}>
+                      {catStyle.icon}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "13px", fontWeight: 700, color: "#f8fafc" }}>{sug.category}</div>
+                      <div style={{ fontSize: "10px", color: signalColor, fontWeight: 600 }}>{signalLabel}</div>
+                    </div>
+                    <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                      <div style={{ fontSize: "18px", fontWeight: 800, color: "#38bdf8" }}>
+                        ${Number(sug.suggested_amount).toFixed(2)}
+                      </div>
+                      <div style={{ fontSize: "9px", color: "#475569" }}>suggested/month</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.55, marginBottom: "12px" }}>{sug.reason}</div>
+                  <div style={{ fontSize: "10px", color: "#334155", marginBottom: "12px" }}>
+                    Avg spend: <strong style={{ color: "#94a3b8" }}>${Number(sug.avg_monthly_spend).toFixed(2)}/mo</strong>
+                    &nbsp;·&nbsp;Based on <strong style={{ color: "#94a3b8" }}>{sug.basis_months} months</strong>
+                  </div>
+                  <div style={{ display: "flex", gap: "6px" }}>
+                    <button
+                      onClick={() => handleAcceptSuggestion(sug)}
+                      disabled={isAccepting}
+                      style={{ flex: 1, padding: "8px", background: isAccepting ? "rgba(34,197,94,0.06)" : "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: "8px", color: "#22c55e", fontSize: "11px", fontWeight: 700, cursor: isAccepting ? "not-allowed" : "pointer", opacity: isAccepting ? 0.6 : 1 }}
+                      onMouseEnter={(e) => { if (!isAccepting) e.currentTarget.style.background = "rgba(34,197,94,0.2)"; }}
+                      onMouseLeave={(e) => { if (!isAccepting) e.currentTarget.style.background = "rgba(34,197,94,0.12)"; }}
+                    >
+                      {isAccepting ? "Saving..." : "✓ Accept"}
+                    </button>
+                    <button
+                      onClick={() => { setRejectSuggestion(sug); setRejectReason(""); }}
+                      style={{ flex: 1, padding: "8px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "8px", color: "#ef4444", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+                      onMouseEnter={(e) => e.currentTarget.style.background = "rgba(239,68,68,0.13)"}
+                      onMouseLeave={(e) => e.currentTarget.style.background = "rgba(239,68,68,0.07)"}
+                    >
+                      ✕ Reject
+                    </button>
+                    <button
+                      onClick={() => setDismissedIds((prev) => new Set([...prev, sug.id]))}
+                      style={{ padding: "8px 10px", background: "transparent", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "8px", color: "#334155", fontSize: "11px", cursor: "pointer" }}
+                      title="Not now — dismiss until next visit"
+                      onMouseEnter={(e) => e.currentTarget.style.color = "#475569"}
+                      onMouseLeave={(e) => e.currentTarget.style.color = "#334155"}
+                    >
+                      Not now
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── BUDGET TRACKER ── */}
       {activeTab === "tracker" && (
@@ -1003,6 +1132,43 @@ export default function BudgetPage() {
                   {savingEnv ? "Creating..." : "Create Envelope"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── REJECT SUGGESTION MODAL ── */}
+      {rejectSuggestion && (
+        <div style={modalOverlay} onClick={() => setRejectSuggestion(null)}>
+          <div style={{ ...modalBox, maxWidth: "380px" }} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ fontSize: "17px", fontWeight: 700, color: "#f8fafc", margin: "0 0 4px", letterSpacing: "-0.02em" }}>Reject suggestion</h2>
+            <p style={{ fontSize: "12px", color: "#475569", margin: "0 0 18px" }}>
+              {rejectSuggestion.category} — ${Number(rejectSuggestion.suggested_amount).toFixed(2)}/month
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "18px" }}>
+              {[
+                { value: "already_budgeted", label: "Already have a budget for this" },
+                { value: "amount_wrong",     label: "Amount seems off" },
+                { value: "skipped",          label: "Skip for now" },
+              ].map(({ value, label }) => (
+                <button
+                  key={value}
+                  onClick={() => setRejectReason(value)}
+                  style={{ padding: "12px 14px", background: rejectReason === value ? "rgba(239,68,68,0.12)" : "rgba(255,255,255,0.03)", border: `1px solid ${rejectReason === value ? "rgba(239,68,68,0.35)" : "rgba(255,255,255,0.08)"}`, borderRadius: "9px", color: rejectReason === value ? "#ef4444" : "#64748b", fontSize: "12px", fontWeight: rejectReason === value ? 700 : 400, cursor: "pointer", textAlign: "left", transition: "all 0.1s ease" }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button onClick={() => setRejectSuggestion(null)} style={{ flex: 1, padding: "11px", background: "transparent", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "9px", color: "#475569", fontSize: "13px", cursor: "pointer" }}>Cancel</button>
+              <button
+                onClick={handleRejectSuggestion}
+                disabled={rejectingSaving}
+                style={{ flex: 1, padding: "11px", background: "linear-gradient(135deg, #dc2626, #b91c1c)", border: "none", borderRadius: "9px", color: "#fff", fontSize: "13px", fontWeight: 700, cursor: rejectingSaving ? "not-allowed" : "pointer", opacity: rejectingSaving ? 0.7 : 1 }}
+              >
+                {rejectingSaving ? "Rejecting..." : "Reject"}
+              </button>
             </div>
           </div>
         </div>

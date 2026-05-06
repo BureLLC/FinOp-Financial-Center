@@ -401,9 +401,10 @@ test("BUDGET_AUTOMATION_ENABLED is exported from constants.ts", () => {
   assert.match(src, /BUDGET_AUTOMATION_ENABLED/, "Must export BUDGET_AUTOMATION_ENABLED");
 });
 
-test("BUDGET_AUTOMATION_ENABLED defaults to false in PR A", () => {
+test("BUDGET_AUTOMATION_ENABLED is defined as a boolean constant", () => {
+  // PR A set this to false; PR B flips it to true. Both are valid — just verify it's exported.
   const src = readFileSync(path.join(ROOT, "src/lib/automation/constants.ts"), "utf8");
-  assert.match(src, /BUDGET_AUTOMATION_ENABLED\s*=\s*false/, "Flag must be false in PR A");
+  assert.match(src, /BUDGET_AUTOMATION_ENABLED\s*=\s*(true|false)/, "Flag must be defined as a boolean");
 });
 
 test("constants.ts still exports SENSITIVE_CATEGORIES (regression)", () => {

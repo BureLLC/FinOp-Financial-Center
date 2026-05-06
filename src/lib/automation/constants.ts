@@ -69,8 +69,6 @@ export const BUSINESS_EXPENSE_SUGGESTIONS_ENABLED = true;
 export const WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED = true;
 
 // Controls whether budget automation is active.
-// Budget Automation PR A: false — tables and services exist but no generation is wired
-// into user-facing routes and the UI is not modified.
-// Flip to true in Budget Automation PR B after generation, accept/reject, and UI are complete.
-// Rollback: set to false and redeploy. No migration needed.
-export const BUDGET_AUTOMATION_ENABLED = false;
+// Budget Automation PR B: true — generation is wired, accept/reject routes exist, UI is ready.
+// Rollback: set to false and redeploy. Accepted monthly_limit values remain as user-approved data.
+export const BUDGET_AUTOMATION_ENABLED = true;
