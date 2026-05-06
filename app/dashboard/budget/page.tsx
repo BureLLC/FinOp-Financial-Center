@@ -195,6 +195,8 @@ export default function BudgetPage() {
   const [rejectSuggestion, setRejectSuggestion] = useState<BudgetSuggestion | null>(null);
   const [rejectReason, setRejectReason] = useState<string>("");
   const [rejectingSaving, setRejectingSaving] = useState(false);
+  const [suggestionLoadError, setSuggestionLoadError] = useState<string | null>(null);
+  const [suggestionActionError, setSuggestionActionError] = useState<string | null>(null);
 
   // Category modals
   const [showAddCategory, setShowAddCategory] = useState(false);
@@ -255,8 +257,13 @@ export default function BudgetPage() {
     setEnvelopeTxs(envTxRes.data ?? []);
 
     const sugRes = await fetch("/api/budget/suggestions").catch(() => null);
-    const sugData = sugRes?.ok ? await sugRes.json().catch(() => ({ suggestions: [] })) : { suggestions: [] };
-    setSuggestions(sugData.suggestions ?? []);
+    if (!sugRes?.ok) {
+      setSuggestionLoadError("Could not load budget suggestions. Please refresh to try again.");
+    } else {
+      const sugData = await sugRes.json().catch(() => ({ suggestions: [] }));
+      setSuggestions(sugData.suggestions ?? []);
+      setSuggestionLoadError(null);
+    }
     setLoading(false);
   };
 
@@ -501,17 +508,21 @@ export default function BudgetPage() {
 
   const handleAcceptSuggestion = async (sug: BudgetSuggestion) => {
     setAcceptingId(sug.id);
+    setSuggestionActionError(null);
     const res = await fetch(`/api/budget/suggestions/${sug.id}/accept`, { method: "POST" }).catch(() => null);
     setAcceptingId(null);
     if (res?.ok) {
       setSuggestions((prev) => prev.filter((s) => s.id !== sug.id));
       await loadData();
+    } else {
+      setSuggestionActionError("Failed to accept suggestion. Please try again.");
     }
   };
 
   const handleRejectSuggestion = async () => {
     if (!rejectSuggestion) return;
     setRejectingSaving(true);
+    setSuggestionActionError(null);
     const body: Record<string, string> = {};
     if (rejectReason) body.rejection_reason = rejectReason;
     const res = await fetch(`/api/budget/suggestions/${rejectSuggestion.id}/reject`, {
@@ -524,6 +535,8 @@ export default function BudgetPage() {
       setSuggestions((prev) => prev.filter((s) => s.id !== rejectSuggestion.id));
       setRejectSuggestion(null);
       setRejectReason("");
+    } else {
+      setSuggestionActionError("Failed to reject suggestion. Please try again.");
     }
   };
 
@@ -573,19 +586,30 @@ export default function BudgetPage() {
       </div>
 
       {/* ── BUDGET SUGGESTIONS ── */}
-      {visibleSuggestions.length > 0 && (
+      {(visibleSuggestions.length > 0 || !!suggestionLoadError) && (
         <div style={{ marginBottom: "28px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
             <div style={{ fontSize: "10px", fontWeight: 700, color: "#334155", letterSpacing: "0.12em" }}>
-              BUDGET SUGGESTIONS ({visibleSuggestions.length})
+              BUDGET SUGGESTIONS {!suggestionLoadError && `(${visibleSuggestions.length})`}
             </div>
           </div>
-          <div style={{ fontSize: "11px", color: "#475569", marginBottom: "16px", lineHeight: 1.6 }}>
-            Based on your past spending — no money is moved and your transactions are not changed.
-            Accepting sets a monthly limit in your Budget Tracker.
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "12px" }}>
-            {visibleSuggestions.map((sug) => {
+          {suggestionLoadError ? (
+            <div style={{ fontSize: "12px", color: "#ef4444", padding: "12px 14px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "9px" }}>
+              {suggestionLoadError}
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: "11px", color: "#475569", marginBottom: "16px", lineHeight: 1.6 }}>
+                Based on your past spending — no money is moved and your transactions are not changed.
+                Accepting sets a monthly limit in your Budget Tracker.
+              </div>
+              {suggestionActionError && (
+                <div style={{ fontSize: "12px", color: "#ef4444", padding: "10px 14px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "9px", marginBottom: "12px" }}>
+                  {suggestionActionError}
+                </div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "12px" }}>
+                {visibleSuggestions.map((sug) => {
               const catStyle = getCategoryStyle(sug.category);
               const isAccepting = acceptingId === sug.id;
               const signalLabel = sug.confidence >= 0.75 ? "High confidence" : "Moderate confidence";
@@ -643,8 +667,10 @@ export default function BudgetPage() {
                   </div>
                 </div>
               );
-            })}
-          </div>
+                })}
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -1160,6 +1186,11 @@ export default function BudgetPage() {
                 </button>
               ))}
             </div>
+            {suggestionActionError && (
+              <div style={{ fontSize: "12px", color: "#ef4444", padding: "10px 14px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "9px", marginBottom: "14px" }}>
+                {suggestionActionError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: "10px" }}>
               <button onClick={() => setRejectSuggestion(null)} style={{ flex: 1, padding: "11px", background: "transparent", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "9px", color: "#475569", fontSize: "13px", cursor: "pointer" }}>Cancel</button>
               <button

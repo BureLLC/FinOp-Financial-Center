@@ -583,3 +583,66 @@ test("budget PR A tests still run: spendingSummaryEngine file exists", () => {
 test("budget PR A tests still run: budget_suggestions migration exists", () => {
   assert.ok(existsSync(path.join(ROOT, "supabase/migrations/20260506000001_add_budget_suggestions.sql")));
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 13. Error feedback: accept/reject/load failures are surfaced to the user
+// ═══════════════════════════════════════════════════════════════════════════════
+
+test("Budget page declares suggestionLoadError state", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  assert.match(src, /suggestionLoadError/, "Must declare suggestionLoadError state");
+  assert.match(src, /setSuggestionLoadError/, "Must have setter for suggestionLoadError");
+});
+
+test("Budget page declares suggestionActionError state", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  assert.match(src, /suggestionActionError/, "Must declare suggestionActionError state");
+  assert.match(src, /setSuggestionActionError/, "Must have setter for suggestionActionError");
+});
+
+test("Budget page sets suggestionLoadError when suggestion fetch fails", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  assert.match(src, /setSuggestionLoadError\s*\(["']/, "Must call setSuggestionLoadError with error message on fetch failure");
+});
+
+test("Budget page clears suggestionLoadError on successful suggestion fetch", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  assert.match(src, /setSuggestionLoadError\s*\(\s*null\s*\)/, "Must clear suggestionLoadError to null on success");
+});
+
+test("Budget page accept handler sets suggestionActionError on failure", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  const acceptHandler = src.match(/handleAcceptSuggestion[\s\S]{0,900}/)?.[0] ?? "";
+  assert.match(acceptHandler, /setSuggestionActionError/, "Accept handler must call setSuggestionActionError on failure");
+});
+
+test("Budget page reject handler sets suggestionActionError on failure", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  const rejectHandler = src.match(/handleRejectSuggestion[\s\S]{0,900}/)?.[0] ?? "";
+  assert.match(rejectHandler, /setSuggestionActionError/, "Reject handler must call setSuggestionActionError on failure");
+});
+
+test("Budget page renders suggestionLoadError in suggestion section", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  const suggestionSection = src.match(/BUDGET SUGGESTIONS[\s\S]{0,2500}/)?.[0] ?? "";
+  assert.match(suggestionSection, /suggestionLoadError/, "Suggestion section must reference suggestionLoadError for conditional rendering");
+  // User-facing load error message is in the JSX render path (may be beyond the slice — check whole file)
+  assert.match(src, /Could not load/, "Must include a user-facing load error message");
+});
+
+test("Budget page renders suggestionActionError in suggestion section", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  const suggestionSection = src.match(/BUDGET SUGGESTIONS[\s\S]{0,2500}/)?.[0] ?? "";
+  assert.match(suggestionSection, /suggestionActionError/, "Suggestion section must render suggestionActionError");
+});
+
+test("Budget page renders suggestionActionError in reject modal", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  const rejectModal = src.match(/REJECT SUGGESTION MODAL[\s\S]{0,2000}/)?.[0] ?? "";
+  assert.match(rejectModal, /suggestionActionError/, "Reject modal must render suggestionActionError");
+});
+
+test("Budget page suggestion section shows when suggestionLoadError is set (not just on card count)", () => {
+  const src = readFileSync(path.join(ROOT, "app/dashboard/budget/page.tsx"), "utf8");
+  assert.match(src, /visibleSuggestions\.length\s*>\s*0\s*\|\|.*suggestionLoadError/, "Suggestion section must render when load error is set, regardless of card count");
+});
