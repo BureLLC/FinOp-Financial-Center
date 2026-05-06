@@ -593,36 +593,65 @@ async function syncIntegrations(supabase: any, userId: string) {
       startDateObj.setDate(startDateObj.getDate() - 90)
       const startDate = startDateObj.toISOString().split("T")[0]
 
-      const txResponse = await fetch("https://production.plaid.com/transactions/get", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_id:    Deno.env.get("PLAID_CLIENT_ID"),
-          secret:       Deno.env.get("PLAID_SECRET"),
-          access_token: connection.access_token_encrypted,
-          start_date:   startDate,
-          end_date:     endDate,
-          options:      { count: 500, offset: 0 },
-        }),
-      })
+      // Paginate through Plaid /transactions/get (max 500 per page).
+      // Safety cap: 5 pages (2500 transactions). Transactions beyond the cap
+      // are deferred to the next sync rather than failing the current one.
+      const PAGE_SIZE = 500
+      const MAX_PAGES = 5
+      let allTransactions: any[] = []
+      let fetchOffset = 0
+      let totalAvailable = Infinity
 
-      const txData = await txResponse.json()
-      if (!txResponse.ok || !txData.transactions) {
-        throw new Error(`Plaid transactions fetch failed: ${JSON.stringify(txData)}`)
+      while (allTransactions.length < totalAvailable && fetchOffset / PAGE_SIZE < MAX_PAGES) {
+        const txResponse = await fetch("https://production.plaid.com/transactions/get", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id:    Deno.env.get("PLAID_CLIENT_ID"),
+            secret:       Deno.env.get("PLAID_SECRET"),
+            access_token: connection.access_token_encrypted,
+            start_date:   startDate,
+            end_date:     endDate,
+            options:      { count: PAGE_SIZE, offset: fetchOffset },
+          }),
+        })
+
+        const txData = await txResponse.json()
+        if (!txResponse.ok || !txData.transactions) {
+          throw new Error(`Plaid transactions fetch failed: ${JSON.stringify(txData)}`)
+        }
+
+        totalAvailable = txData.total_transactions ?? 0
+        const page: any[] = txData.transactions
+        allTransactions = allTransactions.concat(page)
+        fetchOffset += page.length
+        if (page.length < PAGE_SIZE) break  // Plaid returned a short page — last page reached
       }
 
+      // Process each transaction independently so one failure does not abort the rest.
       let transactionsSynced = 0
-      for (const tx of txData.transactions) {
+      let transactionsFailed = 0
+      for (const tx of allTransactions) {
         const financialAccountId = accountIdMap[tx.account_id]
         if (!financialAccountId) continue
-        await upsertTransaction(supabase, userId, financialAccountId, tx)
-        transactionsSynced++
+        try {
+          const result = await upsertTransaction(supabase, userId, financialAccountId, tx)
+          if (result !== "skipped") transactionsSynced++
+        } catch (txErr) {
+          transactionsFailed++
+          console.error(`[sync] transaction insert failed: external_id=${tx.transaction_id ?? "unknown"} err=${txErr instanceof Error ? txErr.message : String(txErr)}`)
+        }
       }
 
-      await completeSyncLog(supabase, syncLogId, "success", accountsData.accounts.length, transactionsSynced, null)
+      const allFailed = transactionsFailed > 0 && transactionsSynced === 0
+      const syncErrMsg = transactionsFailed > 0
+        ? `${transactionsFailed} transaction(s) failed to insert; ${transactionsSynced} succeeded`
+        : null
+
+      await completeSyncLog(supabase, syncLogId, allFailed ? "failed" : "success", accountsData.accounts.length, transactionsSynced, syncErrMsg)
       await supabase
         .from("integration_connections")
-        .update({ sync_status: "synced", last_synced: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .update({ sync_status: allFailed ? "error" : "synced", last_synced: new Date().toISOString(), updated_at: new Date().toISOString() })
         .eq("id", connection.id)
 
     } catch (err) {
@@ -669,6 +698,7 @@ async function upsertFinancialAccount(
     is_business_account:      false,
     is_active:                true,
     is_archived:              false,
+    deleted_at:               null,
     institution_name:         institutionName ?? null,
     mask:                     acct.mask ?? null,
     metadata:                 {},
@@ -692,7 +722,9 @@ async function upsertFinancialAccount(
 }
 
 // ── upsertTransaction ─────────────────────────────────────────────────────────
-async function upsertTransaction(supabase: any, userId: string, financialAccountId: string, tx: any) {
+async function upsertTransaction(
+  supabase: any, userId: string, financialAccountId: string, tx: any
+): Promise<"inserted" | "updated" | "skipped"> {
   const { data: existing } = await supabase
     .from("transactions")
     .select("id")
@@ -715,7 +747,7 @@ async function upsertTransaction(supabase: any, userId: string, financialAccount
       .maybeSingle()
 
     if (duplicateByFingerprint) {
-      return
+      return "skipped"
     }
   }
 
@@ -724,7 +756,7 @@ async function upsertTransaction(supabase: any, userId: string, financialAccount
       .from("transactions")
       .update({ status: tx.pending ? "pending" : "posted", updated_at: new Date().toISOString() })
       .eq("id", existing.id)
-    return
+    return "updated"
   }
 
   const direction = tx.amount >= 0 ? "debit" : "credit"
@@ -752,6 +784,7 @@ async function upsertTransaction(supabase: any, userId: string, financialAccount
   })
 
   if (error) throw new Error(`Failed to insert transaction: ${error.message}`)
+  return "inserted"
 }
 
 // ── startSyncLog ──────────────────────────────────────────────────────────────

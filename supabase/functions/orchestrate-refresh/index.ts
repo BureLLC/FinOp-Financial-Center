@@ -1,16 +1,42 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "https://finopsfinancialcenter.vercel.app",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+const PRODUCTION_ORIGIN = "https://finopsfinancialcenter.vercel.app"
+
+// ADDITIONAL_ALLOWED_ORIGIN: set in Supabase Edge Function environment to allow
+// a staging or preview URL (e.g. http://localhost:3000 or a Vercel preview URL).
+// Never set to "*" — authenticated requests must use an explicit allowlist.
+const ADDITIONAL_ALLOWED_ORIGIN = Deno.env.get("ADDITIONAL_ALLOWED_ORIGIN") ?? ""
+
+const ALLOWED_ORIGINS = new Set([
+  PRODUCTION_ORIGIN,
+  ...(ADDITIONAL_ALLOWED_ORIGIN ? [ADDITIONAL_ALLOWED_ORIGIN] : []),
+])
+
+function corsHeaders(requestOrigin: string | null): Record<string, string> {
+  const origin = requestOrigin && ALLOWED_ORIGINS.has(requestOrigin)
+    ? requestOrigin
+    : PRODUCTION_ORIGIN
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+  }
 }
 
 serve(async (req) => {
+  const origin = req.headers.get("Origin")
+  const hdrs = corsHeaders(origin)
+
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS_HEADERS })
+    return new Response(null, { status: 204, headers: hdrs })
   }
+
+  const json = (payload: unknown, status = 200) =>
+    new Response(JSON.stringify(payload), {
+      status,
+      headers: { "Content-Type": "application/json", ...hdrs },
+    })
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")
@@ -122,10 +148,3 @@ serve(async (req) => {
     return json({ error: "Unexpected error", details: err instanceof Error ? err.message : String(err) }, 500)
   }
 })
-
-function json(payload: unknown, status = 200) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS }
-  })
-}

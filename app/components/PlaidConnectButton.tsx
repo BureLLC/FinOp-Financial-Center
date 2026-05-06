@@ -134,7 +134,7 @@ export default function PlaidConnectButton({ onSuccess, onExit }: Props) {
         <div style={{ padding: "20px", textAlign: "center" }}>
           <div style={{ fontSize: "40px", marginBottom: "12px" }}>✅</div>
           <div style={{ fontSize: "15px", fontWeight: 700, color: "#22c55e", marginBottom: "6px" }}>Bank Connected!</div>
-          <div style={{ fontSize: "13px", color: "#475569" }}>Your account has been linked successfully. Your transactions will sync shortly.</div>
+          <div style={{ fontSize: "13px", color: "#475569" }}>Your account has been linked. Go to <strong>Connections</strong> and click <strong>Sync Now</strong> to import your accounts and transactions.</div>
         </div>
       )}
 
