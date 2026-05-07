@@ -64,6 +64,10 @@ export interface RawWriteOff {
   is_verified: boolean;
   tax_year: number;
   expense_date: string;
+  transaction_id?: string | null;
+  description?: string | null;
+  notes?: string | null;
+  category?: string | null;
 }
 
 export interface DeductionRule {

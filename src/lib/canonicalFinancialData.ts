@@ -699,7 +699,7 @@ export async function getCanonicalCombinedWriteOffs(
   const [manualRes, txBased] = await Promise.all([
     supabase
       .from("write_offs")
-      .select("id, amount, deduction_type, is_verified, tax_year, expense_date, transaction_id")
+      .select("id, amount, deduction_type, is_verified, tax_year, expense_date, transaction_id, description, notes, category")
       .eq("user_id", userId)
       .eq("tax_year", taxYear),
     getCanonicalTransactionBasedWriteOffs(supabase, userId, taxYear),

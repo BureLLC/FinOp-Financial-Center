@@ -134,14 +134,14 @@ export default function WriteOffsPage() {
     // Include both manual and transaction-based write-offs
     const displayWriteOffs: WriteOff[] = combined.manual.map((wo) => ({
       id: wo.id,
-      category: "Manual Entry",
-      description: null,
+      category: (wo as any).category ?? "Manual Entry",
+      description: (wo as any).description ?? null,
       amount: toNum(wo.amount),
       expense_date: wo.expense_date,
       tax_year: wo.tax_year,
       deduction_type: wo.deduction_type,
       is_verified: wo.is_verified,
-      notes: null,
+      notes: (wo as any).notes ?? null,
       transaction_id: (wo as any).transaction_id ?? null,
     }));
 
@@ -155,14 +155,14 @@ export default function WriteOffsPage() {
       if (!linkedTransactionIds.has(tx.id)) {
         displayWriteOffs.push({
           id: tx.id,
-          category: "Transaction-Based",
-          description: tx.description ?? tx.merchant_name ?? "Business Expense",
+          category: tx.merchant_name ?? tx.description ?? tx.category ?? "Business Expense",
+          description: tx.description ?? tx.merchant_name ?? null,
           amount: toNum(tx.amount),
-          expense_date: tx.transaction_date ?? "",
+          expense_date: (tx.transaction_date ?? "").substring(0, 10),
           tax_year: selectedYear,
-          deduction_type: "other", // Default to "other" for transaction-based
-          is_verified: false, // User can verify later
-          notes: "Auto-generated from tagged transaction",
+          deduction_type: "other",
+          is_verified: false,
+          notes: null,
           transaction_id: tx.id,
         });
       }
@@ -185,6 +185,12 @@ export default function WriteOffsPage() {
   const ensureWriteOffRow = async (wo: WriteOff): Promise<string | null> => {
     if (!wo.transaction_id || wo.id !== wo.transaction_id) return wo.id;
 
+    // Use description or deduction type label as the stored category — never a display label.
+    const DISPLAY_LABELS = new Set(["Transaction-Based", "Manual Entry"]);
+    const storedCategory = !wo.category || DISPLAY_LABELS.has(wo.category)
+      ? (wo.description ?? getDeductionType(wo.deduction_type).label ?? "Business Expense")
+      : wo.category;
+
     const res = await fetch("/api/write-offs/ensure-row", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -194,7 +200,7 @@ export default function WriteOffsPage() {
         expense_date: wo.expense_date,
         tax_year: wo.tax_year,
         deduction_type: wo.deduction_type,
-        category: wo.category,
+        category: storedCategory,
         description: wo.description,
       }),
     });
@@ -285,10 +291,14 @@ export default function WriteOffsPage() {
       setListError("Failed to find or create write-off record. Please try again.");
       return;
     }
-    await supabase.from("write_offs").update({
+    const { error } = await supabase.from("write_offs").update({
       is_verified: !wo.is_verified,
       updated_at: new Date().toISOString(),
     }).eq("id", writeOffId);
+    if (error) {
+      setListError("Failed to update verify status. Please try again.");
+      return;
+    }
     await loadData();
   };
 
