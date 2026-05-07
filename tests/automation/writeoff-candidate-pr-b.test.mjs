@@ -70,13 +70,14 @@ test("mark-writeoff-candidate route creates audit log entry", () => {
   assert.match(src, /triggered_by.*user_manual/s, "Must set triggered_by to user_manual");
 });
 
-test("mark-writeoff-candidate route does not create write-offs or affect tax", () => {
+test("mark-writeoff-candidate route creates write_offs row but does not affect Tax Center calculations", () => {
   const src = readFileSync(
     path.join(ROOT, "app/api/automation/transactions/[id]/mark-writeoff-candidate/route.ts"),
     "utf8",
   );
-  // Must not query or write to the write_offs table (import or from() call)
-  assert.doesNotMatch(src, /from\(["']write_offs["']\)/i, "Must not query write_offs table");
+  // Must upsert a write_offs row so Verify/Edit/Delete work immediately
+  assert.match(src, /from\(["']write_offs["']\)/i, "Must reference write_offs table to upsert the row");
+  // Must not touch Tax Center logic or financial calculation modules
   assert.doesNotMatch(src, /tax_center|taxCenter/i, "Must not reference Tax Center");
   assert.doesNotMatch(src, /financialCalculations/i, "Must not import financialCalculations");
   assert.doesNotMatch(src, /canonicalFinancialData/i, "Must not import canonicalFinancialData");

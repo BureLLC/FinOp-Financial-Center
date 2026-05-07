@@ -1,7 +1,3 @@
-// Generates category suggestions for uncategorized debit transactions.
-// Pure matching step — reads from DB but never writes.
-// Writes (INSERT into automation_suggestions) are the caller's responsibility.
-
 import { SupabaseClient } from "@supabase/supabase-js";
 import { RawTransaction } from "../financialCalculations";
 import { AutomationRule, AutomationSuggestion, Phase1ActionConfig } from "./types";
@@ -107,4 +103,75 @@ export async function generateAndStoreSuggestions(
 
   const { error } = await supabase.from("automation_suggestions").insert(toInsert);
   return error ? 0 : toInsert.length;
+}
+
+/**
+ * Finds uncategorized debit transactions matching the given rule and directly
+ * applies the rule's category/subcategory to each one, writing audit log entries.
+ *
+ * Guards (same as buildSuggestionsForRule):
+ *  - direction must be 'debit'
+ *  - transaction must be uncategorized (category IS NULL)
+ *  - proposed category must not be in SENSITIVE_CATEGORIES
+ *  - rule must be active
+ *
+ * The category IS NULL guard in the UPDATE statement prevents a race condition
+ * where two requests categorize the same transaction simultaneously.
+ */
+export async function autoApplyRule(
+  rule: AutomationRule,
+  excludeTransactionId: string,
+  userId: string,
+  supabase: SupabaseClient,
+): Promise<number> {
+  const catAction = rule.action_config as Phase1ActionConfig;
+  if (SENSITIVE_CATEGORIES.has((catAction.category ?? "").toLowerCase())) return 0;
+  if (rule.status !== "active") return 0;
+
+  const { data: txRows } = await supabase
+    .from("transactions")
+    .select("id, direction, amount, status, deleted_at, merchant_name, description, category, subcategory, transaction_date, income_subtype, transaction_type, financial_account_id, external_transaction_id, provider")
+    .eq("direction", "debit")
+    .is("category", null)
+    .is("deleted_at", null)
+    .eq("status", "posted")
+    .neq("id", excludeTransactionId)
+    .limit(200);
+
+  if (!txRows || txRows.length === 0) return 0;
+
+  const candidates = txRows as RawTransaction[];
+  const proposed = buildSuggestionsForRule(rule, candidates, excludeTransactionId);
+  if (proposed.length === 0) return 0;
+
+  let applied = 0;
+  for (const p of proposed) {
+    const { error: updateErr } = await supabase
+      .from("transactions")
+      .update({
+        category: catAction.category ?? null,
+        subcategory: catAction.subcategory ?? null,
+      })
+      .eq("id", p.suggestion.source_entity_id)
+      .is("category", null);
+
+    if (updateErr) continue;
+
+    await supabase.from("automation_audit_log").insert({
+      user_id: userId,
+      automation_rule_id: rule.id,
+      suggestion_id: null,
+      entity_type: "transaction",
+      entity_id: p.suggestion.source_entity_id,
+      action_taken: "set_category",
+      previous_value: { category: null, subcategory: null },
+      new_value: { category: catAction.category ?? null, subcategory: catAction.subcategory ?? null },
+      confidence: p.suggestion.confidence,
+      triggered_by: "user_manual",
+    });
+
+    applied++;
+  }
+
+  return applied;
 }

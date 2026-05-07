@@ -168,8 +168,7 @@ export default function AutomationPage() {
           Automation Rules
         </h1>
         <p style={{ color: "#475569", fontSize: "13.5px", margin: 0 }}>
-          Rules are created when you categorize a transaction. They suggest categories for similar future transactions.
-          You always review and accept or reject each suggestion — nothing is applied automatically.
+          Rules are created when you categorize a transaction. Matching uncategorized transactions are automatically categorized using the same category.
         </p>
       </div>
 
