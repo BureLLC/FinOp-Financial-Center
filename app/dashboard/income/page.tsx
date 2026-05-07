@@ -119,19 +119,26 @@ export default function IncomePage() {
     setSaving(true);
     setPanelMsg(null);
 
-    const { error } = await supabase
-      .from("transactions")
-      .update({
+    const res = await fetch(`/api/automation/transactions/${selected.id}/tag-income`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
         income_subtype: editSubtype || null,
         transaction_type: editSubtype ? "income" : "bank",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", selected.id);
+      }),
+    });
 
-    if (error) {
-      setPanelMsg("Failed to save.");
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setPanelMsg(data.error ?? "Failed to save.");
     } else {
-      setPanelMsg("Saved.");
+      const data = await res.json().catch(() => ({}));
+      const autoApplied: number = data.autoApplied ?? 0;
+      setPanelMsg(
+        autoApplied > 0
+          ? `Saved. Also tagged ${autoApplied} similar transaction${autoApplied === 1 ? "" : "s"}.`
+          : "Saved."
+      );
       setTransactions((prev) =>
         prev.map((t) => t.id === selected.id
           ? { ...t, income_subtype: editSubtype || null, transaction_type: editSubtype ? "income" : "bank" }
@@ -139,6 +146,7 @@ export default function IncomePage() {
         )
       );
       setSelected((prev) => prev ? { ...prev, income_subtype: editSubtype || null } : null);
+      if (autoApplied > 0) await loadData();
     }
     setSaving(false);
   };

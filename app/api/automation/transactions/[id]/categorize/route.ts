@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createRouteClient } from "../../../../../../src/lib/automation/serverSupabase";
 import { SENSITIVE_CATEGORIES } from "../../../../../../src/lib/automation/constants";
 import { createOrStrengthenRule } from "../../../../../../src/lib/automation/ruleBuilder";
-import { generateAndStoreSuggestions } from "../../../../../../src/lib/automation/suggestionEngine";
+import { autoApplyRule } from "../../../../../../src/lib/automation/suggestionEngine";
 
 export async function POST(
   req: NextRequest,
@@ -72,8 +72,8 @@ export async function POST(
     triggered_by: "user_manual",
   });
 
-  // Build/strengthen a rule for future suggestions (only for non-empty, non-sensitive categories)
-  let suggestionsCreated = 0;
+  // Build/strengthen a rule then immediately apply it to matching uncategorized transactions
+  let autoApplied = 0;
   if (newCategory && !SENSITIVE_CATEGORIES.has(newCategory.toLowerCase())) {
     const { rule } = await createOrStrengthenRule(
       { userId, transactionId, merchantName, description, category: newCategory, subcategory },
@@ -81,9 +81,9 @@ export async function POST(
     );
 
     if (rule) {
-      suggestionsCreated = await generateAndStoreSuggestions(rule, transactionId, supabase);
+      autoApplied = await autoApplyRule(rule, transactionId, userId, supabase);
     }
   }
 
-  return NextResponse.json({ success: true, suggestionsCreated });
+  return NextResponse.json({ success: true, autoApplied });
 }

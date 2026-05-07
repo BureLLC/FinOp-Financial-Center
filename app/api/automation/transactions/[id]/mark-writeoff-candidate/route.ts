@@ -4,11 +4,12 @@ import { WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED } from "../../../../../../src/l
 import { createOrStrengthenWriteOffRule } from "../../../../../../src/lib/automation/writeOffRuleBuilder";
 import { generateAndStoreWriteOffSuggestions } from "../../../../../../src/lib/automation/writeOffSuggestionEngine";
 
-// Writes only: transactions.is_writeoff_candidate
-// Never writes: category, subcategory, income_subtype, direction, amount,
-//               transaction_date, transaction_type, status, financial_account_id,
-//               external_transaction_id, provider, deleted_at, or any Plaid/SnapTrade field.
-// Does not create write_offs, update Tax Center, or affect deductible totals.
+// Writes to transactions: is_writeoff_candidate only.
+// Also upserts a write_offs row linked to this transaction so Verify/Edit/Delete work immediately.
+// Never writes: category, subcategory, income_subtype, direction, amount, transaction_date,
+//               transaction_type, status, financial_account_id, external_transaction_id,
+//               provider, deleted_at, or any Plaid/SnapTrade field on transactions.
+// Does not update Tax Center or affect deductible totals.
 
 export async function POST(
   _req: NextRequest,
@@ -19,10 +20,10 @@ export async function POST(
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   // Verify transaction ownership through financial_accounts join.
-  // Also fetch merchant_name, description, direction for rule creation.
+  // Also fetch fields needed for rule creation and write_offs upsert.
   const { data: txRow } = await supabase
     .from("transactions")
-    .select("id, is_writeoff_candidate, merchant_name, description, direction, financial_accounts!inner(user_id)")
+    .select("id, is_writeoff_candidate, merchant_name, description, direction, amount, category, transaction_date, financial_accounts!inner(user_id)")
     .eq("id", transactionId)
     .single();
 
@@ -85,6 +86,35 @@ export async function POST(
   let suggestionsCreated = 0;
   if (WRITE_OFF_CANDIDATE_SUGGESTIONS_ENABLED && rule) {
     suggestionsCreated = await generateAndStoreWriteOffSuggestions(rule, transactionId, supabase);
+  }
+
+  // Upsert write_offs row so Verify/Edit/Delete on the Write-Offs page work immediately.
+  // Only insert if no row already exists for this transaction (idempotent).
+  const { data: existingWoRows } = await supabase
+    .from("write_offs")
+    .select("id")
+    .eq("transaction_id", transactionId)
+    .limit(1);
+
+  if (!existingWoRows || existingWoRows.length === 0) {
+    const rawDate = (txRow as { transaction_date: string | null }).transaction_date;
+    const expenseDate = rawDate ? rawDate.substring(0, 10) : new Date().toISOString().substring(0, 10);
+    const taxYear = new Date(expenseDate).getFullYear();
+
+    await supabase.from("write_offs").insert({
+      user_id: userId,
+      transaction_id: transactionId,
+      category: (txRow as { category: string | null }).category || "Business Expense",
+      description: merchantName ?? description ?? null,
+      amount: Number((txRow as { amount: number | string }).amount ?? 0),
+      expense_date: expenseDate,
+      tax_year: taxYear,
+      deduction_type: "other",
+      is_verified: false,
+      notes: "Auto-generated from write-off candidate tag",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
   }
 
   return NextResponse.json({

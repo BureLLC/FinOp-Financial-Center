@@ -105,6 +105,7 @@ export default function WriteOffsPage() {
   const [newTransactionId, setNewTransactionId] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
 
   // Edit modal
   const [showEdit, setShowEdit] = useState(false);
@@ -141,7 +142,7 @@ export default function WriteOffsPage() {
       deduction_type: wo.deduction_type,
       is_verified: wo.is_verified,
       notes: null,
-      transaction_id: null,
+      transaction_id: (wo as any).transaction_id ?? null,
     }));
 
     // Add transaction-based write-offs (marked as auto-generated)
@@ -176,6 +177,30 @@ export default function WriteOffsPage() {
     setWriteOffs(displayWriteOffs);
     setTransactions(txs);
     setLoading(false);
+  };
+
+  // Returns the real write_offs.id for the given entry.
+  // For transaction-based synthetic entries (wo.id === wo.transaction_id), delegates to
+  // the server route which finds or creates the write_offs row with authenticated session.
+  const ensureWriteOffRow = async (wo: WriteOff): Promise<string | null> => {
+    if (!wo.transaction_id || wo.id !== wo.transaction_id) return wo.id;
+
+    const res = await fetch("/api/write-offs/ensure-row", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transaction_id: wo.transaction_id,
+        amount: wo.amount,
+        expense_date: wo.expense_date,
+        tax_year: wo.tax_year,
+        deduction_type: wo.deduction_type,
+        category: wo.category,
+        description: wo.description,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => ({}));
+    return (data.id as string) ?? null;
   };
 
   const addWriteOff = async () => {
@@ -226,6 +251,14 @@ export default function WriteOffsPage() {
   const saveEdit = async () => {
     if (!selectedWriteOff || !editAmount || !editDate) return;
     setEditSaving(true); setEditMsg(null);
+
+    const writeOffId = await ensureWriteOffRow(selectedWriteOff);
+    if (!writeOffId) {
+      setEditMsg("Failed to find or create write-off record. Please try again.");
+      setEditSaving(false);
+      return;
+    }
+
     const { error } = await supabase.from("write_offs").update({
       category: editCategory,
       description: editDesc || null,
@@ -234,7 +267,7 @@ export default function WriteOffsPage() {
       deduction_type: editType,
       notes: editNotes || null,
       updated_at: new Date().toISOString(),
-    }).eq("id", selectedWriteOff.id);
+    }).eq("id", writeOffId);
 
     if (error) {
       setEditMsg("Failed to save.");
@@ -246,18 +279,47 @@ export default function WriteOffsPage() {
   };
 
   const toggleVerified = async (wo: WriteOff) => {
+    setListError(null);
+    const writeOffId = await ensureWriteOffRow(wo);
+    if (!writeOffId) {
+      setListError("Failed to find or create write-off record. Please try again.");
+      return;
+    }
     await supabase.from("write_offs").update({
       is_verified: !wo.is_verified,
       updated_at: new Date().toISOString(),
-    }).eq("id", wo.id);
+    }).eq("id", writeOffId);
     await loadData();
   };
 
-  const deleteWriteOff = async (id: string) => {
+  const deleteWriteOff = async (wo: WriteOff) => {
     if (!confirm("Delete this write-off?")) return;
-    await supabase.from("write_offs").delete().eq("id", id);
-    await loadData();
-  };
+    setListError(null);
+
+    // For transaction-based synthetic entries, remove the write-off candidacy from
+    // the transaction instead of deleting a write_offs row.
+    if (wo.transaction_id && wo.id === wo.transaction_id) {
+      const { error } = await supabase
+        .from("transactions")
+        .update({ is_writeoff_candidate: null })
+        .eq("id", wo.transaction_id);
+      if (error) setListError("Failed to remove write-off candidate flag.");
+      await loadData();
+      return;
+    }
+
+  // Manual write_offs row: delete it.
+  // If linked to a transaction, also clear is_writeoff_candidate so the
+  // Transactions page no longer shows the Write-Off Candidate badge.
+  if (wo.transaction_id) {
+    await supabase
+      .from("transactions")
+      .update({ is_writeoff_candidate: null })
+      .eq("id", wo.transaction_id);
+  }
+  await supabase.from("write_offs").delete().eq("id", wo.id);
+  await loadData();
+};
 
   // ── Calculations (via central module) ───────────────────────────────────
   const filtered = filterType === "all" ? writeOffs : writeOffs.filter((w) => w.deduction_type === filterType);
@@ -363,6 +425,13 @@ export default function WriteOffsPage() {
             {filterType === "all" ? `ALL WRITE-OFFS (${filtered.length})` : `${getDeductionType(filterType).label.toUpperCase()} (${filtered.length})`}
           </div>
 
+          {listError && (
+            <div style={{ marginBottom: "12px", padding: "10px 14px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "8px", fontSize: "12px", color: "#ef4444", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              {listError}
+              <button onClick={() => setListError(null)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "14px" }}>✕</button>
+            </div>
+          )}
+
           {loading ? (
             <div style={{ padding: "40px", textAlign: "center", color: "#334155" }}>Loading...</div>
           ) : filtered.length === 0 ? (
@@ -425,7 +494,7 @@ export default function WriteOffsPage() {
                         style={{ padding: "5px 10px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "6px", color: "#475569", fontSize: "10px", cursor: "pointer" }}>
                         Edit
                       </button>
-                      <button onClick={() => deleteWriteOff(wo.id)}
+                      <button onClick={() => deleteWriteOff(wo)}
                         style={{ padding: "5px 10px", background: "transparent", border: "none", color: "#334155", fontSize: "10px", cursor: "pointer" }}
                         onMouseEnter={(e) => e.currentTarget.style.color = "#ef4444"}
                         onMouseLeave={(e) => e.currentTarget.style.color = "#334155"}>

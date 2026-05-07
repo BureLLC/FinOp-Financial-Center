@@ -267,31 +267,55 @@ export default function TransactionsPage() {
     setSaving(true);
     setPanelMsg(null);
 
-    // income_subtype and transaction_type via direct write (existing behavior)
-    const metaFields = {
-      income_subtype: editSubtype || null,
-      transaction_type: editType,
-    };
-    const { error } = await supabase
-      .from("transactions")
-      .update({ ...metaFields, updated_at: new Date().toISOString() })
-      .eq("id", selected.id);
+    const isCredit = selected.direction === "credit";
+    const newIncomeSubtype = editSubtype || null;
+    const incomeChanged = newIncomeSubtype !== (selected.income_subtype ?? null);
 
-    if (error) {
-      setPanelMsg("Failed to save. Please try again.");
-      setSaving(false);
-      return;
+    if (isCredit && incomeChanged) {
+      // Route credit income changes through the server route: verifies session,
+      // updates source transaction, and auto-applies to matching credits.
+      const tagRes = await fetch(`/api/automation/transactions/${selected.id}/tag-income`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ income_subtype: newIncomeSubtype, transaction_type: editType }),
+      });
+      if (!tagRes.ok) {
+        const tagData = await tagRes.json().catch(() => ({}));
+        setPanelMsg(tagData.error ?? "Failed to save. Please try again.");
+        setSaving(false);
+        return;
+      }
+      const tagData = await tagRes.json().catch(() => ({}));
+      if ((tagData.autoApplied ?? 0) > 0) await loadData();
+    } else {
+      // Debit transactions: write transaction_type only (never income_subtype for debit).
+      // Credit transactions with no income change: write transaction_type + keep income_subtype.
+      const directFields: Record<string, unknown> = {
+        transaction_type: editType,
+        updated_at: new Date().toISOString(),
+      };
+      if (isCredit) directFields.income_subtype = newIncomeSubtype;
+
+      const { error } = await supabase
+        .from("transactions")
+        .update(directFields)
+        .eq("id", selected.id);
+      if (error) {
+        setPanelMsg("Failed to save. Please try again.");
+        setSaving(false);
+        return;
+      }
     }
 
-    // Category via the categorize endpoint (creates audit log, rule, and suggestions)
+    // Category via the categorize endpoint (auto-applies to matching uncategorized transactions)
     const categoryChanged = editCategory !== (selected.category ?? "");
     let categoryError = false;
-    let suggestionsCreated = 0;
+    let autoApplied = 0;
 
     if (categoryChanged) {
       const isSensitive = SENSITIVE_CATEGORIES.has(editCategory.toLowerCase().trim());
       if (isSensitive) {
-        // Sensitive categories written directly without automation (no rule/suggestion)
+        // Sensitive categories written directly without automation (no rule/auto-apply)
         await supabase
           .from("transactions")
           .update({ category: editCategory || null })
@@ -304,8 +328,8 @@ export default function TransactionsPage() {
         });
         if (catRes.ok) {
           const catData = await catRes.json().catch(() => ({}));
-          suggestionsCreated = catData.suggestionsCreated ?? 0;
-          if (suggestionsCreated > 0) await loadSuggestions();
+          autoApplied = catData.autoApplied ?? 0;
+          if (autoApplied > 0) await loadData();
         } else {
           categoryError = true;
           // Fall back to direct write so the category still saves
@@ -318,46 +342,20 @@ export default function TransactionsPage() {
     }
 
     // Update local state
-    const allUpdated = { ...metaFields, category: editCategory || null };
+    const allUpdated = {
+      income_subtype: newIncomeSubtype,
+      transaction_type: editType,
+      category: editCategory || null,
+    };
     setTransactions((prev) =>
       prev.map((t) => (t.id === selected.id ? { ...t, ...allUpdated } : t))
     );
     setSelected((prev) => (prev ? { ...prev, ...allUpdated } : null));
 
-    // Auto-tag income_subtype for transactions from the same merchant (existing behavior, category excluded)
-    const matchKey = selected.merchant_name?.trim().toLowerCase();
-    const descKey = selected.description?.trim().toLowerCase();
-    let autoTagCount = 0;
-
-    if ((matchKey || descKey) && metaFields.income_subtype != null) {
-      let query = supabase
-        .from("transactions")
-        .update({ income_subtype: metaFields.income_subtype })
-        .neq("id", selected.id)
-        .is("deleted_at", null)
-        .is("income_subtype", null);
-
-      query = matchKey ? query.ilike("merchant_name", matchKey) : query.ilike("description", descKey as string);
-      const { data } = await query.select("id");
-      autoTagCount = (data ?? []).length;
-    }
-
-    if (autoTagCount > 0) {
-      setTransactions((prev) =>
-        prev.map((t) => {
-          if (t.id === selected.id) return t;
-          const name = t.merchant_name?.trim().toLowerCase();
-          const desc = t.description?.trim().toLowerCase();
-          const matches = matchKey ? name === matchKey : desc === descKey;
-          return matches ? { ...t, income_subtype: metaFields.income_subtype } : t;
-        })
-      );
-    }
-
     const msg = categoryError
       ? "Saved, but category automation failed — category saved directly."
-      : suggestionsCreated > 0
-      ? `Saved. Found ${suggestionsCreated} similar transaction${suggestionsCreated === 1 ? "" : "s"} to categorize.`
+      : autoApplied > 0
+      ? `Saved. Auto-categorized ${autoApplied} similar transaction${autoApplied === 1 ? "" : "s"}.`
       : "Saved successfully.";
 
     setPanelMsg(msg);
