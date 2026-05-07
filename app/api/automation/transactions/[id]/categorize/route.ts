@@ -74,6 +74,7 @@ export async function POST(
 
   // Build/strengthen a rule then immediately apply it to matching uncategorized transactions
   let autoApplied = 0;
+  let autoApplyFailed = false;
   if (newCategory && !SENSITIVE_CATEGORIES.has(newCategory.toLowerCase())) {
     const { rule } = await createOrStrengthenRule(
       { userId, transactionId, merchantName, description, category: newCategory, subcategory },
@@ -81,9 +82,21 @@ export async function POST(
     );
 
     if (rule) {
-      autoApplied = await autoApplyRule(rule, transactionId, userId, supabase);
+      const result = await autoApplyRule(rule, transactionId, userId, supabase);
+      autoApplied = result.applied;
+      autoApplyFailed = result.failed;
     }
   }
 
-  return NextResponse.json({ success: true, autoApplied });
+  if (autoApplyFailed) {
+    return NextResponse.json({
+      success: true,
+      categorized: true,
+      autoApplyFailed: true,
+      autoApplied: 0,
+      warning: "Transaction was categorized, but matching transactions could not be auto-updated.",
+    });
+  }
+
+  return NextResponse.json({ success: true, categorized: true, autoApplied });
 }

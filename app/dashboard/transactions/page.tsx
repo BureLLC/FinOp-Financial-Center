@@ -309,7 +309,10 @@ export default function TransactionsPage() {
 
     // Category via the categorize endpoint (auto-applies to matching uncategorized transactions)
     const categoryChanged = editCategory !== (selected.category ?? "");
+    // categoryError: route itself failed (category was saved via fallback direct write)
+    // autoApplyWarning: category was saved but the auto-apply side effect failed
     let categoryError = false;
+    let autoApplyWarning = false;
     let autoApplied = 0;
 
     if (categoryChanged) {
@@ -329,6 +332,7 @@ export default function TransactionsPage() {
         if (catRes.ok) {
           const catData = await catRes.json().catch(() => ({}));
           autoApplied = catData.autoApplied ?? 0;
+          if (catData.autoApplyFailed) autoApplyWarning = true;
           if (autoApplied > 0) await loadData();
         } else {
           categoryError = true;
@@ -354,6 +358,8 @@ export default function TransactionsPage() {
 
     const msg = categoryError
       ? "Saved, but category automation failed — category saved directly."
+      : autoApplyWarning
+      ? "Saved. Matching transactions could not be auto-updated — your categorization was saved."
       : autoApplied > 0
       ? `Saved. Auto-categorized ${autoApplied} similar transaction${autoApplied === 1 ? "" : "s"}.`
       : "Saved successfully.";

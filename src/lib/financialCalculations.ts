@@ -29,12 +29,15 @@ export interface RawTransaction {
   income_subtype?: string | null;
   transaction_type?: string;
   category?: string | null;
+  subcategory?: string | null;
   transaction_date?: string;
   external_transaction_id?: string | null;
   provider?: string | null;
   financial_account_id?: string;
   merchant_name?: string | null;
   description?: string | null;
+  is_business_candidate?: boolean | null;
+  is_writeoff_candidate?: boolean | null;
 }
 
 export interface RawAccount {

@@ -1,11 +1,22 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { RawTransaction } from "../financialCalculations";
-import { AutomationRule, AutomationSuggestion, Phase1ActionConfig } from "./types";
+import { AutomationRule, AutomationSuggestion, Phase1ActionConfig, MerchantNormalizedMatcher, DescriptionPatternMatcher } from "./types";
 import { SENSITIVE_CATEGORIES } from "./constants";
 import { evaluateRule } from "./matcherEngine";
 
 export interface PendingSuggestion {
   suggestion: Omit<AutomationSuggestion, "id" | "created_at" | "resolved_at" | "resolved_by">;
+}
+
+/**
+ * Result from autoApplyRule.
+ * applied: number of transactions updated (0 = no eligible matches).
+ * failed: true only when a DB error prevented the update from running.
+ *         false for all "skip" paths (guards, no matches, no signal).
+ */
+export interface AutoApplyResult {
+  applied: number;
+  failed: boolean;
 }
 
 /**
@@ -107,71 +118,99 @@ export async function generateAndStoreSuggestions(
 
 /**
  * Finds uncategorized debit transactions matching the given rule and directly
- * applies the rule's category/subcategory to each one, writing audit log entries.
+ * applies the rule's category/subcategory, writing audit log entries.
  *
- * Guards (same as buildSuggestionsForRule):
+ * Guards:
  *  - direction must be 'debit'
  *  - transaction must be uncategorized (category IS NULL)
  *  - proposed category must not be in SENSITIVE_CATEGORIES
  *  - rule must be active
  *
- * The category IS NULL guard in the UPDATE statement prevents a race condition
- * where two requests categorize the same transaction simultaneously.
+ * Uses DB-level ILIKE matching (same approach as tag-income auto-apply) instead of
+ * JS-level evaluation. This handles null merchant_name cases and partial name
+ * variations that caused the JS path to return zero matches in production.
+ *
+ * The .is("category", null) guard on the UPDATE prevents a race condition where
+ * two requests categorize the same transaction simultaneously.
  */
 export async function autoApplyRule(
   rule: AutomationRule,
   excludeTransactionId: string,
   userId: string,
   supabase: SupabaseClient,
-): Promise<number> {
-  const catAction = rule.action_config as Phase1ActionConfig;
-  if (SENSITIVE_CATEGORIES.has((catAction.category ?? "").toLowerCase())) return 0;
-  if (rule.status !== "active") return 0;
+): Promise<AutoApplyResult> {
+  const skip: AutoApplyResult = { applied: 0, failed: false };
 
-  const { data: txRows } = await supabase
+  const catAction = rule.action_config as Phase1ActionConfig;
+  const category = catAction.category ?? null;
+  if (!category || SENSITIVE_CATEGORIES.has(category.toLowerCase())) return skip;
+  if (rule.status !== "active") return skip;
+
+  // Base query: uncategorized debit posted transactions for this user.
+  // Explicit user_id filter in addition to RLS for defence-in-depth.
+  // .is("category", null) on the UPDATE is the race-condition guard.
+  let matchQuery = supabase
     .from("transactions")
-    .select("id, direction, amount, status, deleted_at, merchant_name, description, category, subcategory, transaction_date, income_subtype, transaction_type, financial_account_id, external_transaction_id, provider")
+    .update({
+      category,
+      subcategory: catAction.subcategory ?? null,
+    })
+    .eq("user_id", userId)
     .eq("direction", "debit")
     .is("category", null)
     .is("deleted_at", null)
     .eq("status", "posted")
-    .neq("id", excludeTransactionId)
-    .limit(200);
+    .neq("id", excludeTransactionId);
 
-  if (!txRows || txRows.length === 0) return 0;
+  // Apply matcher-specific DB-level filter, mirroring the tag-income approach.
+  if (rule.matcher_type === "merchant_normalized") {
+    const mc = rule.matcher_config as MerchantNormalizedMatcher;
+    if (!mc.normalized_merchant) return skip;
+    // Very short normalized names (< 4 chars) produce overly broad %substring% patterns
+    // that risk matching unrelated merchants. Skip auto-apply; the rule is still created
+    // and strengthened for future use.
+    if (mc.normalized_merchant.length < 4) return skip;
+    matchQuery = matchQuery.ilike("merchant_name", `%${mc.normalized_merchant}%`);
+  } else if (rule.matcher_type === "description_pattern") {
+    const mc = rule.matcher_config as DescriptionPatternMatcher;
+    if (!mc.description_tokens?.length) return skip;
+    // Chain all tokens as AND-chained ILIKE filters (PostgREST ANDs multiple .ilike() calls).
+    // Using only the first token risks over-matching when it is a generic word like "pos" or
+    // "payment". Requiring every token to appear anywhere in the description gives the same
+    // recall as JS evaluateDescriptionMatcher at a 100% hit rate, with far fewer false positives.
+    for (const token of mc.description_tokens) {
+      matchQuery = matchQuery.ilike("description", `%${token}%`);
+    }
+  } else {
+    return skip;
+  }
 
-  const candidates = txRows as RawTransaction[];
-  const proposed = buildSuggestionsForRule(rule, candidates, excludeTransactionId);
-  if (proposed.length === 0) return 0;
+  const { data: matched, error: updateErr } = await matchQuery.select("id");
+  if (updateErr) {
+    console.error("[autoApplyRule] update failed:", updateErr.message);
+    return { applied: 0, failed: true };
+  }
 
-  let applied = 0;
-  for (const p of proposed) {
-    const { error: updateErr } = await supabase
-      .from("transactions")
-      .update({
-        category: catAction.category ?? null,
-        subcategory: catAction.subcategory ?? null,
-      })
-      .eq("id", p.suggestion.source_entity_id)
-      .is("category", null);
+  const applied = (matched ?? []).length;
 
-    if (updateErr) continue;
-
-    await supabase.from("automation_audit_log").insert({
+  if (applied > 0) {
+    const auditRows = (matched ?? []).map((tx: { id: string }) => ({
       user_id: userId,
       automation_rule_id: rule.id,
       suggestion_id: null,
       entity_type: "transaction",
-      entity_id: p.suggestion.source_entity_id,
+      entity_id: tx.id,
       action_taken: "set_category",
       previous_value: { category: null, subcategory: null },
-      new_value: { category: catAction.category ?? null, subcategory: catAction.subcategory ?? null },
-      confidence: p.suggestion.confidence,
+      new_value: { category, subcategory: catAction.subcategory ?? null },
+      confidence: rule.confidence,
       triggered_by: "user_manual",
+    }));
+    // Audit insert is non-blocking — failure does not roll back the category update.
+    supabase.from("automation_audit_log").insert(auditRows).then(({ error: auditErr }) => {
+      if (auditErr) console.error("[autoApplyRule] audit insert failed:", auditErr.message);
     });
-
-    applied++;
   }
 
-  return applied;
+  return { applied, failed: false };
 }

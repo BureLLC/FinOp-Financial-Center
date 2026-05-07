@@ -35,6 +35,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# local QA seed data — never commit
+scripts/qa-seed.sql
+scripts/qa-seed-teardown.sql
+
 # vercel
 .vercel
 
