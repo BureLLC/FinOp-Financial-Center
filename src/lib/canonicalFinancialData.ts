@@ -659,9 +659,12 @@ export async function getCanonicalTransactionBasedWriteOffs(
 ): Promise<RawTransaction[]> {
   const { transactions } = await getCanonicalTransactions(supabase, userId);
 
-  // Filter to deductible business expense transactions using central classification
+  // Filter to deductible business expense transactions using central classification.
+  // Also exclude transactions where is_writeoff_candidate is explicitly false —
+  // this is set by the Write-Off page delete flow so that deleted entries do not
+  // reappear via the category-based auto-discovery path.
   const deductibleExpenses = activePostedTransactions(transactions).filter(
-    (tx) => isDeductibleBusinessExpense(tx) && tx.transaction_date
+    (tx) => isDeductibleBusinessExpense(tx) && tx.transaction_date && tx.is_writeoff_candidate !== false
   );
 
   // Filter to transactions in the requested tax year

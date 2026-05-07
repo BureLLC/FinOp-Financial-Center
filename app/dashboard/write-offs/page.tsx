@@ -296,30 +296,43 @@ export default function WriteOffsPage() {
     if (!confirm("Delete this write-off?")) return;
     setListError(null);
 
-    // For transaction-based synthetic entries, remove the write-off candidacy from
-    // the transaction instead of deleting a write_offs row.
+    // For transaction-based synthetic entries (id === transaction_id), the Write-Off
+    // page fabricated the id from the transaction. Clear the write-off candidate flag
+    // so the entry no longer appears via the category-based auto-discovery path.
+    // Use false (not null) so getCanonicalTransactionBasedWriteOffs can exclude it.
     if (wo.transaction_id && wo.id === wo.transaction_id) {
       const { error } = await supabase
         .from("transactions")
-        .update({ is_writeoff_candidate: null })
+        .update({ is_writeoff_candidate: false })
         .eq("id", wo.transaction_id);
-      if (error) setListError("Failed to remove write-off candidate flag.");
+      if (error) {
+        setListError("Failed to remove write-off candidate flag. Please try again.");
+        return;
+      }
       await loadData();
       return;
     }
 
-  // Manual write_offs row: delete it.
-  // If linked to a transaction, also clear is_writeoff_candidate so the
-  // Transactions page no longer shows the Write-Off Candidate badge.
-  if (wo.transaction_id) {
-    await supabase
-      .from("transactions")
-      .update({ is_writeoff_candidate: null })
-      .eq("id", wo.transaction_id);
-  }
-  await supabase.from("write_offs").delete().eq("id", wo.id);
-  await loadData();
-};
+    // Manual write_offs row (including rows auto-created by mark-writeoff-candidate).
+    // If linked to a transaction, set is_writeoff_candidate = false so the entry
+    // does not reappear as a Transaction-Based entry after the row is deleted.
+    if (wo.transaction_id) {
+      const { error: txErr } = await supabase
+        .from("transactions")
+        .update({ is_writeoff_candidate: false })
+        .eq("id", wo.transaction_id);
+      if (txErr) {
+        setListError("Failed to update transaction status. Please try again.");
+        return;
+      }
+    }
+    const { error: deleteErr } = await supabase.from("write_offs").delete().eq("id", wo.id);
+    if (deleteErr) {
+      setListError("Failed to delete write-off. Please try again.");
+      return;
+    }
+    await loadData();
+  };
 
   // ── Calculations (via central module) ───────────────────────────────────
   const filtered = filterType === "all" ? writeOffs : writeOffs.filter((w) => w.deduction_type === filterType);

@@ -424,28 +424,40 @@ test("SENSITIVE_CATEGORIES is unchanged — still has exactly 12 entries", () =>
 
 test("canonicalFinancialData.ts references is_writeoff_candidate only in the SELECT string, not in financial logic", () => {
   // PR A absence guard retired — PR B adds is_writeoff_candidate to the canonical SELECT (read-only).
-  // The field must still not appear inside any financial calculation function body.
+  // Session 3: is_writeoff_candidate now also used in the filter *caller* (not inside the function body).
   const src = readFileSync(
     path.join(ROOT, "src/lib/canonicalFinancialData.ts"),
     "utf8",
   );
   assert.match(src, /is_writeoff_candidate/,
-    "PR B adds is_writeoff_candidate to canonical SELECT for UI availability");
-  // Verify it is not used inside isDeductibleBusinessExpense or similar financial logic
+    "is_writeoff_candidate must be present in canonicalFinancialData.ts");
+  // The isDeductibleBusinessExpense function body itself must not reference is_writeoff_candidate.
+  // (The caller filter may use it — this check targets the function definition only.)
+  const fnIdx = src.indexOf("function isDeductibleBusinessExpense");
+  assert.notEqual(fnIdx, -1, "isDeductibleBusinessExpense must exist");
+  const fnBody = src.slice(fnIdx, fnIdx + 400);
   assert.doesNotMatch(
+    fnBody,
+    /is_writeoff_candidate/,
+    "is_writeoff_candidate must not appear inside isDeductibleBusinessExpense function body",
+  );
+  // The filter caller must add the is_writeoff_candidate !== false guard alongside isDeductibleBusinessExpense.
+  assert.match(
     src,
-    /isDeductibleBusinessExpense[\s\S]{0,500}is_writeoff_candidate/,
-    "is_writeoff_candidate must not appear inside isDeductibleBusinessExpense",
+    /isDeductibleBusinessExpense\(tx\)[\s\S]{0,200}is_writeoff_candidate !== false/,
+    "getCanonicalTransactionBasedWriteOffs must add is_writeoff_candidate !== false guard",
   );
 });
 
-test("financialCalculations.ts does not reference is_writeoff_candidate", () => {
+test("financialCalculations.ts RawTransaction interface includes is_writeoff_candidate field", () => {
+  // PR A absence guard retired — Session 3 intentionally adds is_writeoff_candidate to RawTransaction
+  // so the write-off delete filter (is_writeoff_candidate !== false) can work with the shared type.
   const src = readFileSync(
     path.join(ROOT, "src/lib/financialCalculations.ts"),
     "utf8",
   );
-  assert.doesNotMatch(src, /is_writeoff_candidate/,
-    "financialCalculations.ts must not reference is_writeoff_candidate in PR A");
+  assert.match(src, /is_writeoff_candidate\?[^:]*:.*boolean/,
+    "RawTransaction must include is_writeoff_candidate field for write-off delete logic");
 });
 
 // ─── 9. Accept route: write_off_candidate wired via RPC (PR B) ───────────────

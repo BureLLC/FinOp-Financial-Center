@@ -536,26 +536,37 @@ test("canonicalFinancialData.ts does not use is_writeoff_candidate in financial 
     path.join(ROOT, "src/lib/canonicalFinancialData.ts"),
     "utf8",
   );
-  // is_writeoff_candidate should only appear in the SELECT string, not inside any function body.
-  // Extract function bodies by splitting on top-level 'export function'/'export async function'.
+  // is_writeoff_candidate is allowed in:
+  //  - getCanonicalTransactions (SELECT string)
+  //  - getCanonicalTransactionBasedWriteOffs (filter caller — Session 3 adds !== false guard)
+  // It must NOT appear inside pure financial calculation functions (isDeductibleBusinessExpense, etc.).
   const fnBodies = src.split(/export (?:async )?function /);
   for (const body of fnBodies.slice(1)) {
-    // Only check functions whose name is NOT getCanonicalTransactions (which owns the SELECT)
     if (body.startsWith("getCanonicalTransactions")) continue;
+    if (body.startsWith("getCanonicalTransactionBasedWriteOffs")) continue;
     assert.doesNotMatch(
       body,
       /is_writeoff_candidate/,
       `is_writeoff_candidate must not appear in financial calculation function bodies`,
     );
   }
+  // The filter caller must positively use the !== false guard (not just the SELECT).
+  assert.match(
+    src,
+    /is_writeoff_candidate !== false/,
+    "getCanonicalTransactionBasedWriteOffs must add is_writeoff_candidate !== false guard",
+  );
 });
 
-test("financialCalculations.ts does not reference is_writeoff_candidate", () => {
+test("financialCalculations.ts RawTransaction interface includes is_writeoff_candidate", () => {
+  // PR B absence guard retired — Session 3 intentionally adds is_writeoff_candidate to RawTransaction
+  // so the write-off delete filter (is_writeoff_candidate !== false) works with the shared type.
   const src = readFileSync(
     path.join(ROOT, "src/lib/financialCalculations.ts"),
     "utf8",
   );
-  assert.doesNotMatch(src, /is_writeoff_candidate/, "financialCalculations must not reference is_writeoff_candidate");
+  assert.match(src, /is_writeoff_candidate\?[^:]*:.*boolean/,
+    "RawTransaction must include is_writeoff_candidate field");
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
