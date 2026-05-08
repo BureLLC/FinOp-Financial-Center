@@ -402,3 +402,62 @@ test("canonicalFinancialData.ts getCanonicalCombinedWriteOffs is unchanged", () 
   assert.match(CANONICAL_SRC, /export async function getCanonicalCombinedWriteOffs/,
     "getCanonicalCombinedWriteOffs must still exist — write-off path not touched by LevelUP fix");
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 15. Write-off source parity — LevelUP matches the Write-Offs page exactly
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP imports getCanonicalCombinedWriteOffs (same source as Write-Offs page)", () => {
+  assert.match(PAGE_SRC, /getCanonicalCombinedWriteOffs/,
+    "LevelUP must use getCanonicalCombinedWriteOffs — the same canonical source as the Write-Offs page");
+});
+
+test("LevelUP does not query write_offs table directly for totals", () => {
+  // Must not fall back to a raw write_offs select — that misses transaction-based write-offs
+  assert.doesNotMatch(PAGE_SRC, /from\("write_offs"\)\.select\("amount"\)/,
+    "LevelUP must not query write_offs directly; must use getCanonicalCombinedWriteOffs");
+});
+
+test("LevelUP calls getCanonicalCombinedWriteOffs with supabase, user.id, and currentYear", () => {
+  assert.match(PAGE_SRC, /getCanonicalCombinedWriteOffs\(supabase,\s*user\.id,\s*currentYear\)/,
+    "getCanonicalCombinedWriteOffs must be scoped to the authenticated user and current year");
+});
+
+test("LevelUP write-off total includes transaction-based write-offs (writeOffCombined.transactionBased)", () => {
+  assert.match(PAGE_SRC, /writeOffCombined\.transactionBased/,
+    "LevelUP must include transaction-based write-offs — the Write-Offs page shows these too");
+});
+
+test("LevelUP write-off total includes manual write-offs (writeOffCombined.manual)", () => {
+  assert.match(PAGE_SRC, /writeOffCombined\.manual/,
+    "LevelUP must include manual write-off entries from the write_offs table");
+});
+
+test("LevelUP deduplicates: skips tx-based entries already linked to a manual write-off", () => {
+  assert.match(PAGE_SRC, /linkedTxIds/,
+    "LevelUP must maintain a linkedTxIds set to exclude already-linked transaction-based entries");
+  assert.match(PAGE_SRC, /linkedTxIds\.has\(tx\.id\)/,
+    "LevelUP must filter transactionBased entries using linkedTxIds to prevent double-counting");
+});
+
+test("LevelUP excludes suppressed/deleted transaction-based write-offs (is_writeoff_candidate guard)", () => {
+  // getCanonicalCombinedWriteOffs → getCanonicalTransactionBasedWriteOffs already filters
+  // is_writeoff_candidate !== false (set by delete flow). Verify the canonical guard exists.
+  assert.match(CANONICAL_SRC, /is_writeoff_candidate\s*!==\s*false/,
+    "canonical layer must exclude suppressed write-off candidates (is_writeoff_candidate !== false)");
+});
+
+test("LevelUP snapshot and chat context use the same write-off total (single totalWriteOffs field)", () => {
+  // Both the sidebar snapshot and buildSystemPrompt use ctx.totalWriteOffs
+  assert.match(PAGE_SRC, /ctx\.totalWriteOffs/,
+    "both snapshot and chat context must reference ctx.totalWriteOffs for consistency");
+  assert.match(PAGE_SRC, /context\.totalWriteOffs/,
+    "sidebar display must also reference context.totalWriteOffs from the same fetched value");
+});
+
+test("write-off deduction calculation logic in financialCalculations.ts is not modified", () => {
+  assert.match(CALCS_SRC, /export function calcTotalWriteOffExpenses/,
+    "calcTotalWriteOffExpenses must be unchanged — LevelUP fix must not touch deduction logic");
+  assert.match(CALCS_SRC, /export function calcTotalDeductible/,
+    "calcTotalDeductible must be unchanged — LevelUP fix must not touch deduction logic");
+});
