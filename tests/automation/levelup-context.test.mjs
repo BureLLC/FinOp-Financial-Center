@@ -117,7 +117,7 @@ test("LevelUP page has a fetchContextData function", () => {
 });
 
 test("fetchContextData returns FinancialContext or null (safe error path)", () => {
-  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,6000}?return null;\s*\}/);
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,8000}?return null;\s*\}/);
   assert.ok(match, "fetchContextData must have a return null path for safe error handling");
 });
 
@@ -248,7 +248,7 @@ test("error messages do not reference internal implementation details", () => {
 test("fetchContextData does not hardcode any dollar amounts", () => {
   // Look for suspicious hardcoded dollar values (e.g., 50000, 100000, 25000)
   // near the context building logic — these would be mock data
-  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,3000}?return \{/);
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,4000}?return \{/);
   assert.ok(match, "fetchContextData body must be extractable");
   const body = match[0];
   assert.doesNotMatch(body, /netWorth:\s*\d{4,}/,
@@ -460,4 +460,159 @@ test("write-off deduction calculation logic in financialCalculations.ts is not m
     "calcTotalWriteOffExpenses must be unchanged — LevelUP fix must not touch deduction logic");
   assert.match(CALCS_SRC, /export function calcTotalDeductible/,
     "calcTotalDeductible must be unchanged — LevelUP fix must not touch deduction logic");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 16. Tax Center source parity — LevelUP matches Tax Center live semantics
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP imports getCanonicalTaxableIncome (same source as Tax Center page)", () => {
+  assert.match(PAGE_SRC, /getCanonicalTaxableIncome/,
+    "LevelUP must import getCanonicalTaxableIncome — the same live canonical source used by the Tax Center page");
+});
+
+test("LevelUP calls getCanonicalTaxableIncome with supabase, user.id, and currentYear", () => {
+  assert.match(PAGE_SRC, /getCanonicalTaxableIncome\(supabase,\s*user\.id,\s*currentYear\)/,
+    "getCanonicalTaxableIncome must be scoped to the authenticated user and current year");
+});
+
+test("LevelUP declares liveZero based on taxableProfit === 0 (not > 0 truthy check)", () => {
+  assert.match(PAGE_SRC, /liveZero\s*=\s*ctiRes\.taxableProfit\s*===\s*0/,
+    "liveZero must use strict equality (=== 0) — truthy check (> 0) would treat valid zero as missing data");
+  assert.doesNotMatch(PAGE_SRC, /ctiRes\.taxableProfit\s*>\s*0/,
+    "must not use > 0 check for liveZero — that incorrectly discards a valid zero taxable income");
+});
+
+test("LevelUP totalTaxLiability is zeroed when liveZero is true (not unconditionally from batch)", () => {
+  assert.match(PAGE_SRC, /totalTaxLiability:\s*liveZero\s*\?\s*0\s*:/,
+    "totalTaxLiability must apply the liveZero gate — batch tax_estimates must not override a valid live zero");
+});
+
+test("LevelUP valid zero taxableProfit does not fall back to stale tax_estimates liability", () => {
+  // The pattern `liveZero ? 0 : toNum(taxRes.data?.total_tax_liability)` is required.
+  // Verify the unconditional `toNum(taxRes.data?.total_tax_liability)` form is NOT used.
+  assert.doesNotMatch(PAGE_SRC, /totalTaxLiability:\s*toNum\(taxRes\.data/,
+    "totalTaxLiability must not be set unconditionally from taxRes — liveZero gate is required");
+});
+
+test("LevelUP FinancialContext interface includes taxableIncome field", () => {
+  assert.match(PAGE_SRC, /taxableIncome:\s*number/,
+    "FinancialContext must include taxableIncome so the live canonical value is available to the system prompt");
+});
+
+test("LevelUP taxableIncome is set from ctiRes.taxableProfit (canonical source)", () => {
+  assert.match(PAGE_SRC, /taxableIncome:\s*ctiRes\.taxableProfit/,
+    "taxableIncome must come from the canonical getCanonicalTaxableIncome result, not from tax_estimates");
+});
+
+test("LevelUP system prompt includes live taxableIncome (Tax Center value matches canonical)", () => {
+  assert.match(PAGE_SRC, /ctx\.taxableIncome/,
+    "buildSystemPrompt must include ctx.taxableIncome so the AI sees the live canonical taxable income");
+  assert.match(PAGE_SRC, /Taxable Income/,
+    "system prompt must label the taxable income field so the AI distinguishes it from the batch estimate");
+});
+
+test("LevelUP system prompt labels taxableIncome as live/canonical (not batch)", () => {
+  assert.match(PAGE_SRC, /canonical.*self-employment|self-employment.*canonical/i,
+    "system prompt taxableIncome label must indicate it is a canonical/live value scoped to business & self-employment");
+});
+
+test("LevelUP system prompt labels totalTaxLiability as batch-generated (not live)", () => {
+  assert.match(PAGE_SRC, /batch-generated.*zeroed|zeroed.*batch-generated/i,
+    "system prompt Tax Center Estimate label must indicate it is batch-generated and zeroed when live income is zero");
+});
+
+test("LevelUP still queries tax_estimates for liability when liveZero is false", () => {
+  // The fix gates the value, not removes the source. tax_estimates must still be queried.
+  assert.match(PAGE_SRC, /from\("tax_estimates"\)/,
+    "tax_estimates must still be queried — it provides the batch estimate when live taxable income is nonzero");
+});
+
+test("LevelUP snapshot sidebar totalTaxLiability is now the gated value (UI unchanged)", () => {
+  // The sidebar uses context.totalTaxLiability — which is now correctly gated.
+  // No new sidebar row was added (UI placement preserved).
+  assert.match(PAGE_SRC, /context\.totalTaxLiability/,
+    "sidebar still uses context.totalTaxLiability — now gated by liveZero");
+  assert.doesNotMatch(PAGE_SRC, /context\.taxableIncome/,
+    "taxableIncome must not appear in the sidebar — UI layout is unchanged, new field is system-prompt-only");
+});
+
+test("LevelUP canonical tax source (getCanonicalTaxableIncome) exists in canonicalFinancialData.ts", () => {
+  assert.match(CANONICAL_SRC, /export async function getCanonicalTaxableIncome/,
+    "getCanonicalTaxableIncome must exist in canonicalFinancialData.ts — it is the live tax source");
+});
+
+test("getCanonicalTaxableIncome applies year filter symmetrically to both income and expenses", () => {
+  // Both business income and deductible expenses must filter by the same taxYear.
+  // The code assigns getFullYear() to txYear then compares: txYear === taxYear.
+  // This must appear at least twice in the function body (once for income, once for expenses).
+  const matches = [...CANONICAL_SRC.matchAll(/txYear\s*===\s*taxYear/g)];
+  assert.ok(matches.length >= 2,
+    "getCanonicalTaxableIncome must filter BOTH business income and deductible expenses by taxYear (txYear === taxYear must appear at least twice)");
+});
+
+test("LevelUP does not mix tax_estimates taxable_income into the live taxableIncome field", () => {
+  assert.doesNotMatch(PAGE_SRC, /taxableIncome:.*taxRes/,
+    "taxableIncome must not be sourced from taxRes (batch tax_estimates) — must use ctiRes (canonical)");
+  assert.doesNotMatch(PAGE_SRC, /taxableIncome:.*taxable_income/,
+    "taxableIncome must not reference the batch taxable_income field from tax_estimates");
+});
+
+test("LevelUP context includes businessIncome from canonical source (Tax Center KPI parity)", () => {
+  assert.match(PAGE_SRC, /businessIncome:\s*ctiRes\.businessIncome/,
+    "businessIncome must come from getCanonicalTaxableIncome — same canonical source as Tax Center's Business Income KPI");
+});
+
+test("LevelUP context includes deductibleExpenses from canonical source (Tax Center KPI parity)", () => {
+  assert.match(PAGE_SRC, /deductibleExpenses:\s*ctiRes\.deductibleExpenses/,
+    "deductibleExpenses must come from getCanonicalTaxableIncome — same canonical source as Tax Center's Deductible Expenses KPI");
+});
+
+test("LevelUP context includes balanceDue with liveZero gate (Tax Center parity)", () => {
+  assert.match(PAGE_SRC, /balanceDue:\s*liveZero\s*\?\s*0\s*:/,
+    "balanceDue must apply the same liveZero gate as Tax Center's displayBalanceDue");
+});
+
+test("LevelUP context includes underpaymentFlag with liveZero gate (Tax Center parity)", () => {
+  assert.match(PAGE_SRC, /underpaymentFlag:\s*liveZero\s*\?\s*false\s*:/,
+    "underpaymentFlag must apply the same liveZero gate as Tax Center's displayUnderpayment");
+});
+
+test("LevelUP tax_estimates query fetches balance_due and underpayment_flag (Tax Center parity)", () => {
+  assert.match(PAGE_SRC, /balance_due.*underpayment_flag|underpayment_flag.*balance_due/,
+    "tax_estimates SELECT must include balance_due and underpayment_flag to match Tax Center source");
+});
+
+test("LevelUP system prompt includes Balance Due field with underpayment indicator", () => {
+  assert.match(PAGE_SRC, /Balance Due/,
+    "system prompt must include Balance Due so AI can advise on underpayment risk");
+  assert.match(PAGE_SRC, /ctx\.balanceDue/,
+    "system prompt Balance Due must use the liveZero-gated ctx.balanceDue value");
+  assert.match(PAGE_SRC, /underpaymentFlag/,
+    "system prompt must reference underpaymentFlag to surface underpayment risk to the AI");
+});
+
+test("LevelUP system prompt includes businessIncome and deductibleExpenses", () => {
+  assert.match(PAGE_SRC, /ctx\.businessIncome/,
+    "system prompt must include ctx.businessIncome for AI to answer business income questions");
+  assert.match(PAGE_SRC, /ctx\.deductibleExpenses/,
+    "system prompt must include ctx.deductibleExpenses for AI to answer deduction questions");
+});
+
+test("LevelUP balanceDue and underpaymentFlag come from tax_estimates (batch), not a hardcoded value", () => {
+  assert.match(PAGE_SRC, /taxRes\.data\?\.balance_due/,
+    "balanceDue must reference taxRes.data?.balance_due — the batch tax_estimates row");
+  assert.match(PAGE_SRC, /taxRes\.data\?\.underpayment_flag/,
+    "underpaymentFlag must reference taxRes.data?.underpayment_flag — the batch tax_estimates row");
+});
+
+test("LevelUP FinancialContext interface declares all Tax Center parity fields", () => {
+  assert.match(PAGE_SRC, /businessIncome:\s*number/,
+    "FinancialContext must declare businessIncome: number");
+  assert.match(PAGE_SRC, /deductibleExpenses:\s*number/,
+    "FinancialContext must declare deductibleExpenses: number");
+  assert.match(PAGE_SRC, /balanceDue:\s*number/,
+    "FinancialContext must declare balanceDue: number");
+  assert.match(PAGE_SRC, /underpaymentFlag:\s*boolean/,
+    "FinancialContext must declare underpaymentFlag: boolean");
 });
