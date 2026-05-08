@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
-import { getCanonicalTransactions, getCanonicalInvestments, getCanonicalCombinedWriteOffs } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalTransactions, getCanonicalInvestments, getCanonicalCombinedWriteOffs, getCanonicalTaxableIncome } from "../../../src/lib/canonicalFinancialData";
 import {
   activePostedTransactions,
   calcTotalCash,
@@ -28,7 +28,12 @@ interface FinancialContext {
   openTradesCount: number;
   activeGoalsCount: number;
   totalSaved: number;
+  taxableIncome: number;
+  businessIncome: number;
+  deductibleExpenses: number;
   totalTaxLiability: number;
+  balanceDue: number;
+  underpaymentFlag: boolean;
   totalWriteOffs: number;
   budgetCategories: { name: string; spent: number; limit: number }[];
   recentTransactions: { description: string | null; amount: number; direction: string; date: string }[];
@@ -166,6 +171,7 @@ export default function LevelUpPage() {
         tradesRes,
         taxRes,
         writeOffCombined,
+        ctiRes,
         profileRes,
       ] = await Promise.all([
         // Canonical source: inner-joins to financial_accounts so only active-account
@@ -178,9 +184,12 @@ export default function LevelUpPage() {
         supabase.from("budget_categories").select("id, name, monthly_limit").eq("user_id", user.id).eq("is_active", true),
         supabase.from("savings_goals").select("name, current_amount, target_amount").eq("user_id", user.id).eq("status", "active"),
         supabase.from("trades").select("symbol, direction, asset_type, entry_price").eq("user_id", user.id).eq("status", "open").is("deleted_at", null),
-        supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
+        // Batch tax estimates — used for liability figures only when live taxable income is nonzero.
+        supabase.from("tax_estimates").select("total_tax_liability, balance_due, underpayment_flag").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
         // Same canonical source as the Write-Offs page: manual + transaction-based, scoped to year.
         getCanonicalCombinedWriteOffs(supabase, user.id, currentYear),
+        // Same canonical source as Tax Center: live business income minus deductible expenses.
+        getCanonicalTaxableIncome(supabase, user.id, currentYear),
         supabase.from("tax_profiles").select("filing_status, entity_type").eq("user_id", user.id).eq("is_primary", true).eq("is_active", true).maybeSingle(),
       ]);
 
@@ -211,6 +220,10 @@ export default function LevelUpPage() {
       // rawTxs is already ordered desc by transaction_date from getCanonicalTransactions
       const recentPosted = allPosted.slice(0, 5);
 
+      // When live taxable income is zero, all liability figures from the batch tax_estimates
+      // table must also be zeroed — matching the Tax Center liveZero gate exactly.
+      const liveZero = ctiRes.taxableProfit === 0;
+
       return {
         netWorth,
         totalCash,
@@ -220,7 +233,12 @@ export default function LevelUpPage() {
         openTradesCount: tradesRes.data?.length ?? 0,
         activeGoalsCount: goalsRes.data?.length ?? 0,
         totalSaved: (goalsRes.data ?? []).reduce((s: number, g: any) => s + toNum(g.current_amount), 0),
-        totalTaxLiability: toNum(taxRes.data?.total_tax_liability),
+        taxableIncome: ctiRes.taxableProfit,
+        businessIncome: ctiRes.businessIncome,
+        deductibleExpenses: ctiRes.deductibleExpenses,
+        totalTaxLiability: liveZero ? 0 : toNum(taxRes.data?.total_tax_liability),
+        balanceDue: liveZero ? 0 : toNum(taxRes.data?.balance_due),
+        underpaymentFlag: liveZero ? false : Boolean(taxRes.data?.underpayment_flag),
         // Dedup: match the Write-Offs page exactly — manual entries + tx-based not already
         // linked to a manual write-off via transaction_id. Avoids double-counting.
         totalWriteOffs: (() => {
@@ -305,7 +323,11 @@ USER'S CURRENT FINANCIAL SNAPSHOT (fetched at message time; balances, transactio
 - Expenses YTD: ${fmt(ctx.totalExpenses)}
 - Open Trades: ${ctx.openTradesCount} (${openTradesSummary || "none"})
 - Active Savings Goals: ${ctx.activeGoalsCount} — Total Saved: ${fmt(ctx.totalSaved)}
-- Tax Center Estimate: ${fmt(ctx.totalTaxLiability)} (Tax Center figure; batch-generated, reflects data as of last recalculation)
+- Taxable Income (Live): ${fmt(ctx.taxableIncome)} (canonical; business & self-employment only, current year)
+- Business Income: ${fmt(ctx.businessIncome)} (live canonical)
+- Deductible Expenses: ${fmt(ctx.deductibleExpenses)} (live canonical; write-offs applied)
+- Tax Center Estimate: ${fmt(ctx.totalTaxLiability)} (batch-generated; zeroed when live taxable income is zero)
+- Balance Due: ${fmt(ctx.balanceDue)}${ctx.underpaymentFlag ? " ⚠️ Underpayment risk" : " (on track)"} (batch-generated; zeroed when live taxable income is zero)
 - Total Write-Offs This Year: ${fmt(ctx.totalWriteOffs)}
 - Tax Profile: ${ctx.taxProfile ? `${ctx.taxProfile.filing_status} / ${ctx.taxProfile.entity_type}` : "Not set up"}
 - Budget Categories Over Limit: ${overBudget.length > 0 ? overBudget.map((c) => `${c.name} ($${c.spent} / $${c.limit})`).join(", ") : "None"}
