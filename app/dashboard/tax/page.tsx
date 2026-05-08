@@ -457,7 +457,7 @@ export default function TaxCenterPage() {
               <div>
                 <div style={{ fontSize: "13px", fontWeight: 700, color: "#f59e0b", marginBottom: "4px" }}>Tag Income to Activate Tax Estimates</div>
                 <div style={{ fontSize: "12px", color: "#64748b", lineHeight: 1.6 }}>
-                  Tag transactions in the <a href="/dashboard/income" style={{ color: "#38bdf8", textDecoration: "none" }}>Income Tracker</a> or use <strong style={{ color: "#22c55e" }}>+ Add Income</strong> above. Only Business and Rental income feed the tax engine.
+                  Tag transactions in the <a href="/dashboard/income" style={{ color: "#38bdf8", textDecoration: "none" }}>Income Tracker</a> or use <strong style={{ color: "#22c55e" }}>+ Add Income</strong> above. Only Business and Self-Employment income feed the tax engine.
                 </div>
               </div>
             </div>
@@ -494,12 +494,12 @@ export default function TaxCenterPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px", marginBottom: "24px" }}>
             {[
               { label: "Total Tax Liability", value: fmt(totalLiability),              color: "#ef4444", rgb: "239,68,68",   sub: "2026 annual estimate" },
-              { label: "Taxable Income",       value: fmt(displayTaxableIncome),        color: "#38bdf8", rgb: "56,189,248",  sub: "Business & rental only" },
+              { label: "Taxable Income",       value: fmt(displayTaxableIncome),        color: "#38bdf8", rgb: "56,189,248",  sub: "Business & self-employment only" },
               { label: "Business Income",      value: fmt(cti.businessIncome), color: "#22c55e", rgb: "34,197,94", sub: "Gross business revenue" },
               { label: "Deductible Expenses",  value: fmt(cti.deductibleExpenses), color: "#f97316", rgb: "249,115,22", sub: "Write-offs applied" },
               { label: "Effective Rate",       value: `${effectiveRate.toFixed(1)}%`,   color: "#f59e0b", rgb: "245,158,11", sub: "Of taxable income" },
               { label: "Balance Due",          value: fmt(annual?.balance_due ?? 0),    color: annual?.underpayment_flag ? "#ef4444" : "#22c55e", rgb: annual?.underpayment_flag ? "239,68,68" : "34,197,94", sub: annual?.underpayment_flag ? "⚠️ Underpayment" : "On track" },
-              { label: "Tagged Income",        value: String(taggedIncomeCount),         color: "#a855f7", rgb: "168,85,247", sub: "Transactions tagged" },
+              { label: "Tagged Income",        value: String(taggedIncomeCount),         color: "#a855f7", rgb: "168,85,247", sub: "All types tagged" },
             ].map((k, i) => (
               <div key={i} style={{ padding: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "12px", position: "relative", overflow: "hidden" }}>
                 <div style={{ position: "absolute", top: "-20px", right: "-20px", width: "70px", height: "70px", borderRadius: "50%", background: `radial-gradient(circle, rgba(${k.rgb},0.1) 0%, transparent 70%)`, pointerEvents: "none" }} />
