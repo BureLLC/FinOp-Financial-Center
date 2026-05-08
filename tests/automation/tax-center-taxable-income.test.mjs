@@ -341,7 +341,77 @@ test("taxableProfit is still capped at zero in the canonical calculation (Math.m
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 8. Zero scenarios: deductible >= income must display 0, not fallback
+// 8. liveZero consistency: all liability figures zero when live taxable income is zero
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("liveZero flag is declared and gates liability figures", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /const liveZero\s*=/,
+    "liveZero variable must be declared to gate all liability figures"
+  );
+  assert.match(
+    TAX_PAGE_SRC,
+    /liveZero.*canonicalTaxableIncome\s*!==\s*null[\s\S]{0,50}?displayTaxableIncome\s*===\s*0/,
+    "liveZero must be true only when live data loaded AND displayTaxableIncome is exactly 0"
+  );
+});
+
+test("totalLiability is zero when liveZero (stale tax_estimates suppressed)", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /totalLiability\s*=\s*liveZero\s*\?\s*0/,
+    "totalLiability must be forced to 0 when liveZero — stale tax_estimates must not override"
+  );
+});
+
+test("taxBreakdown is empty when liveZero", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /taxBreakdown\s*=\s*liveZero\s*\?\s*\[\]/,
+    "taxBreakdown must be empty array when liveZero — stale breakdown must not show"
+  );
+});
+
+test("displayBalanceDue is zero when liveZero", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /displayBalanceDue\s*=\s*liveZero\s*\?\s*0/,
+    "displayBalanceDue must be 0 when liveZero"
+  );
+});
+
+test("displayUnderpayment is false when liveZero", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /displayUnderpayment\s*=\s*liveZero\s*\?\s*false/,
+    "displayUnderpayment flag must be false when liveZero — no underpayment warning on zero income"
+  );
+});
+
+test("Balance Due KPI uses displayBalanceDue (not raw annual.balance_due)", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /Balance Due[\s\S]{0,100}?displayBalanceDue/,
+    "Balance Due KPI must use displayBalanceDue, not raw annual?.balance_due"
+  );
+  assert.doesNotMatch(
+    TAX_PAGE_SRC,
+    /Balance Due[\s\S]{0,100}?annual\?\.balance_due/,
+    "Balance Due KPI must not read annual?.balance_due directly — use displayBalanceDue"
+  );
+});
+
+test("quarterly estimated amounts are zero when liveZero", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /liveZero\s*\?\s*0\s*:[\s\S]{0,50}?total_tax_liability/,
+    "quarterly amounts must be suppressed to 0 when liveZero"
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Canonical zero scenarios: deductible >= income must display 0, not fallback
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("taxableProfit formula guarantees zero when deductibleExpenses >= businessIncome", () => {
@@ -377,7 +447,7 @@ test("displayTaxableIncome comes from cti.taxableProfit which is always <= cti.b
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 9. Effective Rate uses corrected displayTaxableIncome, not stale fallback
+// 10. Effective Rate uses corrected displayTaxableIncome, not stale fallback
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("effectiveRate is computed from displayTaxableIncome (not raw tax_estimates.taxable_income)", () => {
@@ -402,24 +472,24 @@ test("effectiveRate is zero when displayTaxableIncome is zero (guard in place)",
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 10. Total Tax Liability and Balance Due are independent of displayTaxableIncome
+// 11. Total Tax Liability and Balance Due: independence from displayTaxableIncome confirmed
 // ═══════════════════════════════════════════════════════════════════════════
 
-test("Total Tax Liability comes directly from tax_estimates (not derived from displayTaxableIncome)", () => {
-  // totalLiability is the recalculated backend value — it must NOT be derived from the
-  // potentially-stale displayTaxableIncome. It should come straight from annual.total_tax_liability.
+test("Total Tax Liability uses liveZero guard then tax_estimates fallback", () => {
+  // totalLiability must be 0 when liveZero, else comes from annual.total_tax_liability.
+  // It must never be derived from displayTaxableIncome.
   assert.match(
     TAX_PAGE_SRC,
-    /totalLiability\s*=\s*annual\?\.total_tax_liability/,
-    "totalLiability must come from annual.total_tax_liability, not from displayTaxableIncome"
+    /totalLiability\s*=\s*liveZero\s*\?\s*0[\s\S]{0,60}?total_tax_liability/,
+    "totalLiability must be 0 when liveZero, else annual.total_tax_liability"
   );
 });
 
-test("Balance Due comes directly from tax_estimates (not derived from displayTaxableIncome)", () => {
+test("Balance Due uses displayBalanceDue (liveZero-gated, not raw annual.balance_due in KPI)", () => {
   assert.match(
     TAX_PAGE_SRC,
-    /annual\?\.balance_due/,
-    "Balance Due must come from annual.balance_due in tax_estimates"
+    /displayBalanceDue\s*=\s*liveZero\s*\?\s*0/,
+    "displayBalanceDue must be 0 when liveZero, else annual.balance_due"
   );
   assert.doesNotMatch(
     TAX_PAGE_SRC,
