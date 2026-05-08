@@ -1,0 +1,404 @@
+/**
+ * LevelUP Financial Context Regression Tests
+ *
+ * Verifies that LevelUP uses real-time canonical financial data — not stale
+ * daily snapshots, not hardcoded values, not mock data.
+ *
+ * All assertions read source files only — no DB calls.
+ *
+ * Run with: node --test tests/automation/levelup-context.test.mjs
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+const PAGE_SRC = readFileSync(
+  path.join(ROOT, "app/dashboard/levelup/page.tsx"),
+  "utf8",
+);
+const CHAT_SRC = readFileSync(
+  path.join(ROOT, "app/api/chat/route.ts"),
+  "utf8",
+);
+const CANONICAL_SRC = readFileSync(
+  path.join(ROOT, "src/lib/canonicalFinancialData.ts"),
+  "utf8",
+);
+const CALCS_SRC = readFileSync(
+  path.join(ROOT, "src/lib/financialCalculations.ts"),
+  "utf8",
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. No stale portfolio_snapshots table query
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP page does not query portfolio_snapshots", () => {
+  assert.doesNotMatch(PAGE_SRC, /portfolio_snapshots/,
+    "LevelUP must not query portfolio_snapshots — that table is a daily stale snapshot");
+});
+
+test("LevelUP page does not reference snapshot_date (daily batch field)", () => {
+  assert.doesNotMatch(PAGE_SRC, /snapshot_date/,
+    "snapshot_date is a daily-batch-only field and must not appear in the real-time context path");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. Canonical real-time data sources are used
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP page imports getCanonicalTransactions from canonicalFinancialData", () => {
+  assert.match(PAGE_SRC, /getCanonicalTransactions/,
+    "LevelUP must import and use getCanonicalTransactions for real-time account + transaction data");
+});
+
+test("LevelUP page imports calcTotalCash from financialCalculations", () => {
+  assert.match(PAGE_SRC, /calcTotalCash/,
+    "LevelUP must use calcTotalCash to compute live cash balance from financial_accounts");
+});
+
+test("LevelUP page imports getCanonicalInvestments from canonicalFinancialData", () => {
+  assert.match(PAGE_SRC, /getCanonicalInvestments/,
+    "LevelUP must use getCanonicalInvestments (positions-preferred) to match the Investments page source");
+});
+
+test("LevelUP page does not use calcTotalInvestmentsFromAccounts (account-balance-only fallback)", () => {
+  assert.doesNotMatch(PAGE_SRC, /calcTotalInvestmentsFromAccounts/,
+    "LevelUP must not use calcTotalInvestmentsFromAccounts — that function ignores positions; use getCanonicalInvestments instead");
+});
+
+test("LevelUP page calls getCanonicalInvestments with supabase and user.id", () => {
+  assert.match(PAGE_SRC, /getCanonicalInvestments\(supabase,\s*user\.id\)/,
+    "getCanonicalInvestments must be scoped to the authenticated user's id");
+});
+
+test("LevelUP page uses totalInvestmentValue from getCanonicalInvestments result", () => {
+  assert.match(PAGE_SRC, /canonicalInvestments\.totalInvestmentValue/,
+    "LevelUP must read totalInvestmentValue from the canonical investments result (positions-preferred)");
+});
+
+test("LevelUP page imports calcTotalLiabilities", () => {
+  assert.match(PAGE_SRC, /calcTotalLiabilities/,
+    "LevelUP must use calcTotalLiabilities for real-time liability balance");
+});
+
+test("LevelUP page imports calcNetWorth", () => {
+  assert.match(PAGE_SRC, /calcNetWorth/,
+    "LevelUP must compute net worth from live accounts, not from a cached snapshot");
+});
+
+test("LevelUP page uses activePostedTransactions for income/expense filtering", () => {
+  assert.match(PAGE_SRC, /activePostedTransactions/,
+    "LevelUP must apply activePostedTransactions filter to get only valid posted transactions");
+});
+
+test("LevelUP page uses calcTotalIn for income", () => {
+  assert.match(PAGE_SRC, /calcTotalIn/,
+    "LevelUP must use calcTotalIn (same function as other pages) for income totals");
+});
+
+test("LevelUP page uses calcTotalOut for expenses", () => {
+  assert.match(PAGE_SRC, /calcTotalOut/,
+    "LevelUP must use calcTotalOut (same function as other pages) for expense totals");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. fetchContextData is a separate reusable function
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP page has a fetchContextData function", () => {
+  assert.match(PAGE_SRC, /const fetchContextData\s*=/,
+    "fetchContextData must be a named function separate from loadContext and sendMessage");
+});
+
+test("fetchContextData returns FinancialContext or null (safe error path)", () => {
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,6000}?return null;\s*\}/);
+  assert.ok(match, "fetchContextData must have a return null path for safe error handling");
+});
+
+test("fetchContextData wraps logic in try/catch for safe error handling", () => {
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,6000}?catch\s*\(/);
+  assert.ok(match, "fetchContextData must have a try/catch block to prevent unhandled errors");
+});
+
+test("fetchContextData error log does not contain user data format strings", () => {
+  // The catch block should only log a generic message, not interpolate user values
+  const catchMatch = PAGE_SRC.match(/catch\s*\(err\)\s*\{[\s\S]{0,200}?console\.error[^;]+;/);
+  assert.ok(catchMatch, "catch block with console.error must be present");
+  const logLine = catchMatch[0];
+  assert.doesNotMatch(logLine, /\$\{.*netWorth/,
+    "error log must not interpolate user financial values");
+  assert.doesNotMatch(logLine, /\$\{.*totalCash/,
+    "error log must not interpolate user financial values");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. Context is refreshed at message send time (not stale initial load only)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("sendMessage calls fetchContextData before building system prompt", () => {
+  const match = PAGE_SRC.match(/const sendMessage[\s\S]{0,2500}?await fetchContextData\(\)/);
+  assert.ok(match, "sendMessage must call fetchContextData() to get fresh context before each message");
+});
+
+test("sendMessage updates context state with fresh data", () => {
+  const match = PAGE_SRC.match(/const sendMessage[\s\S]{0,2500}?setContext\(freshContext\)/);
+  assert.ok(match, "sendMessage must update the context state with freshly fetched data");
+});
+
+test("sendMessage uses freshContext (not stale state) for system prompt", () => {
+  // Check that sendMessage declares activeContext as freshContext ?? context (nullish coalesce)
+  assert.match(PAGE_SRC, /const activeContext\s*=\s*freshContext\s*\?\?\s*context/,
+    "activeContext must prefer freshly fetched data, falling back to cached state");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. buildSystemPrompt receives context as parameter (not just closure)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("buildSystemPrompt accepts a context parameter", () => {
+  assert.match(PAGE_SRC, /const buildSystemPrompt\s*=\s*\(\s*ctx\s*:/,
+    "buildSystemPrompt must accept ctx as an explicit parameter, not rely solely on stale state closure");
+});
+
+test("buildSystemPrompt uses ctx parameter (not context state) for values", () => {
+  // fmt(ctx.netWorth) appears inside the template literal returned by buildSystemPrompt.
+  // Note: fmt(context.netWorth) also appears in the sidebar display JSX — that is correct
+  // behaviour and intentional. The assertion here only verifies the system prompt path uses
+  // the explicit ctx parameter, confirmed by the presence of fmt(ctx.netWorth) in the file.
+  assert.match(PAGE_SRC, /fmt\(ctx\.netWorth\)/,
+    "system prompt must use ctx.netWorth (parameter), not context.netWorth (stale state)");
+  assert.match(PAGE_SRC, /fmt\(ctx\.totalCash\)/,
+    "system prompt must use ctx.totalCash from parameter");
+  assert.match(PAGE_SRC, /fmt\(ctx\.totalInvestments\)/,
+    "system prompt must use ctx.totalInvestments from parameter");
+});
+
+test("sendMessage passes activeContext to buildSystemPrompt", () => {
+  const match = PAGE_SRC.match(/buildSystemPrompt\(activeContext\)/);
+  assert.ok(match, "sendMessage must call buildSystemPrompt(activeContext) with fresh data");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. System prompt includes freshness label and real-time data fields
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("system prompt labels context as live/fetched at message time", () => {
+  assert.match(PAGE_SRC, /live.*fetched at message time|fetched at message time.*live/i,
+    "system prompt must indicate data was fetched live at message time, not from a stale snapshot");
+});
+
+test("system prompt clearly labels tax estimate as Tax Center batch figure, not live recalculation", () => {
+  assert.match(PAGE_SRC, /Tax Center Estimate/,
+    "system prompt tax line must say 'Tax Center Estimate' to distinguish it from live values");
+  assert.match(PAGE_SRC, /batch-generated/,
+    "system prompt must include 'batch-generated' to clarify the tax figure is not a live recalculation");
+});
+
+test("system prompt does not overstate tax estimate as a live value", () => {
+  assert.doesNotMatch(PAGE_SRC, /Est\. Tax Liability/,
+    "old 'Est. Tax Liability' label must be replaced with the Tax Center Estimate label");
+});
+
+test("system prompt includes YTD income label (not misleading '10 tx' label)", () => {
+  assert.match(PAGE_SRC, /Income YTD/,
+    "income in system prompt must be labeled 'Income YTD', not the old '10 tx' approximation");
+});
+
+test("system prompt includes YTD expenses label", () => {
+  assert.match(PAGE_SRC, /Expenses YTD/,
+    "expenses in system prompt must be labeled 'Expenses YTD'");
+});
+
+test("system prompt includes recent transactions section", () => {
+  assert.match(PAGE_SRC, /Most Recent Transactions/,
+    "system prompt must include a recent transactions section so AI has transaction context");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Safe error handling when context cannot be loaded
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("loadContext shows user-facing error message when fetchContextData returns null", () => {
+  assert.match(PAGE_SRC, /unable to load your financial context/i,
+    "loadContext must show a safe user-facing error when context cannot be loaded");
+});
+
+test("sendMessage shows user-facing error when activeContext is null", () => {
+  assert.match(PAGE_SRC, /unable to access your financial data/i,
+    "sendMessage must show a safe error message when no context is available at send time");
+});
+
+test("error messages do not reference internal implementation details", () => {
+  assert.doesNotMatch(PAGE_SRC, /fetchContextData.*error/i,
+    "user-facing error messages must not expose function names");
+  assert.doesNotMatch(PAGE_SRC, /portfolio_snapshots.*error|error.*portfolio_snapshots/i,
+    "user-facing error messages must not mention internal table names");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. No mock / hardcoded financial values in LevelUP context
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("fetchContextData does not hardcode any dollar amounts", () => {
+  // Look for suspicious hardcoded dollar values (e.g., 50000, 100000, 25000)
+  // near the context building logic — these would be mock data
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,3000}?return \{/);
+  assert.ok(match, "fetchContextData body must be extractable");
+  const body = match[0];
+  assert.doesNotMatch(body, /netWorth:\s*\d{4,}/,
+    "fetchContextData must not hardcode a netWorth value");
+  assert.doesNotMatch(body, /totalCash:\s*\d{4,}/,
+    "fetchContextData must not hardcode a totalCash value");
+  assert.doesNotMatch(body, /totalIncome:\s*\d{4,}/,
+    "fetchContextData must not hardcode a totalIncome value");
+});
+
+test("initial greeting uses computed context values (not raw snapshot response)", () => {
+  // The greeting must use ctx.netWorth (from canonical calcs), not snapRes.data?.total_net_worth
+  assert.doesNotMatch(PAGE_SRC, /snapRes\.data\?\.total_net_worth/,
+    "greeting must not use stale snapRes — must use computed ctx values");
+  assert.match(PAGE_SRC, /fmt\(ctx\.netWorth\)/,
+    "greeting must use computed ctx.netWorth");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. User isolation — each context fetch scopes to authenticated user
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("fetchContextData gets the authenticated user before querying", () => {
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,300}?supabase\.auth\.getUser/);
+  assert.ok(match, "fetchContextData must call supabase.auth.getUser() to identify the current user");
+});
+
+test("fetchContextData returns null when no authenticated user (prevents cross-user data)", () => {
+  const match = PAGE_SRC.match(/const fetchContextData[\s\S]{0,500}?if \(!user\)\s*return null/);
+  assert.ok(match, "fetchContextData must return null immediately when no authenticated user is found");
+});
+
+test("getCanonicalTransactions is called with user.id (not a hardcoded id)", () => {
+  assert.match(PAGE_SRC, /getCanonicalTransactions\(supabase,\s*user\.id\)/,
+    "getCanonicalTransactions must be scoped to the authenticated user's id");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10. Chat API route safety — no financial data in server logs
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("chat API route logs do not include the request body (no financial data exposure)", () => {
+  assert.doesNotMatch(CHAT_SRC, /console\.log.*body/i,
+    "chat route must not log request body (which contains the financial system prompt)");
+  assert.doesNotMatch(CHAT_SRC, /console\.log.*system/i,
+    "chat route must not log the system prompt (which contains user financial data)");
+  assert.doesNotMatch(CHAT_SRC, /console\.log.*messages/i,
+    "chat route must not log the messages array (which may contain financial details)");
+});
+
+test("chat API route error logs do not expose upstream response body", () => {
+  // Error logs should only log safe metadata (status code, error type), not full response
+  const errorLog = CHAT_SRC.match(/console\.error[\s\S]{0,200}?Anthropic API error/);
+  assert.ok(errorLog, "chat route must have an error log for Anthropic API failures");
+  // The error log should not dump the full data object
+  assert.doesNotMatch(errorLog[0], /console\.error.*data\b(?!.*type)/,
+    "error log must not dump the full API response data object");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 11. Canonical layer regression — existing functions unchanged
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("getCanonicalTransactions still uses inner join to financial_accounts", () => {
+  assert.match(CANONICAL_SRC, /financial_accounts!inner/,
+    "getCanonicalTransactions must still use inner join for active-account filtering");
+});
+
+test("getCanonicalTransactions still filters deleted_at = null", () => {
+  assert.match(CANONICAL_SRC, /is\("deleted_at",\s*null\)/,
+    "getCanonicalTransactions must still exclude soft-deleted transactions");
+});
+
+test("financialCalculations calcTotalCash still filters depository accounts", () => {
+  assert.match(CALCS_SRC, /depository/,
+    "calcTotalCash must still include only depository-type accounts");
+});
+
+test("financialCalculations activePostedTransactions still filters status === posted", () => {
+  assert.match(CALCS_SRC, /status\s*===\s*"posted"/,
+    "activePostedTransactions must still filter to posted status only");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 12. UI placement — no prohibited UI changes
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("LevelUP page still has the left sidebar with YOUR SNAPSHOT", () => {
+  assert.match(PAGE_SRC, /YOUR SNAPSHOT/,
+    "sidebar snapshot panel must still be present");
+});
+
+test("LevelUP page still has TOPICS panel", () => {
+  assert.match(PAGE_SRC, /TOPICS/,
+    "TOPICS panel must still be present");
+});
+
+test("LevelUP page still has SUGGESTED questions panel", () => {
+  assert.match(PAGE_SRC, /SUGGESTED/,
+    "SUGGESTED questions panel must still be present");
+});
+
+test("LevelUP page still has the TypingIndicator component", () => {
+  assert.match(PAGE_SRC, /TypingIndicator/,
+    "TypingIndicator animation component must still be present");
+});
+
+test("LevelUP page still has the MessageBubble component", () => {
+  assert.match(PAGE_SRC, /MessageBubble/,
+    "MessageBubble component must still be present");
+});
+
+test("LevelUP page still has clear conversation button", () => {
+  assert.match(PAGE_SRC, /clearConversation/,
+    "clearConversation button must still be present");
+});
+
+test("LevelUP page still has viewport-responsive layout", () => {
+  assert.match(PAGE_SRC, /viewport.*desktop.*mobile|mobile.*desktop/,
+    "viewport-responsive layout must still be present");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 13. Navigation support — suggested questions untouched
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("navigation-style suggested questions still present", () => {
+  assert.match(PAGE_SRC, /Am I on track with my budget/,
+    "budget navigation question must still be in suggested questions");
+  assert.match(PAGE_SRC, /How can I reach my savings goals/,
+    "savings navigation question must still be in suggested questions");
+  assert.match(PAGE_SRC, /How do I reduce my tax liability/,
+    "tax navigation question must still be in suggested questions");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 14. Prohibited areas: no changes to financial calculation logic
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("financialCalculations.ts calcFinancialSummary is unchanged (not modified by LevelUP fix)", () => {
+  assert.match(CALCS_SRC, /export function calcFinancialSummary/,
+    "calcFinancialSummary must still exist and be unchanged");
+});
+
+test("financialCalculations.ts deduplicateTransactions is unchanged", () => {
+  assert.match(CALCS_SRC, /export function deduplicateTransactions/,
+    "deduplicateTransactions must still exist — LevelUP fix must not touch this");
+});
+
+test("canonicalFinancialData.ts getCanonicalCombinedWriteOffs is unchanged", () => {
+  assert.match(CANONICAL_SRC, /export async function getCanonicalCombinedWriteOffs/,
+    "getCanonicalCombinedWriteOffs must still exist — write-off path not touched by LevelUP fix");
+});

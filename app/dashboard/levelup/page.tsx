@@ -2,6 +2,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
+import { getCanonicalTransactions, getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
+import {
+  activePostedTransactions,
+  calcTotalCash,
+  calcTotalLiabilities,
+  calcNetWorth,
+  calcTotalIn,
+  calcTotalOut,
+  toNum,
+} from "../../../src/lib/financialCalculations";
 
 interface Message {
   role: "user" | "assistant";
@@ -21,7 +31,7 @@ interface FinancialContext {
   totalTaxLiability: number;
   totalWriteOffs: number;
   budgetCategories: { name: string; spent: number; limit: number }[];
-  recentTransactions: { description: string; amount: number; direction: string; date: string }[];
+  recentTransactions: { description: string | null; amount: number; direction: string; date: string }[];
   openTrades: { symbol: string; direction: string; asset_type: string; entry_price: number }[];
   savings: { name: string; current: number; target: number }[];
   taxProfile: { filing_status: string; entity_type: string } | null;
@@ -137,83 +147,154 @@ export default function LevelUpPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  // Fetch all financial context from real-time canonical sources.
+  // Called both on initial load and before each message send.
+  // Uses live financial_accounts + transactions data — same canonical source as the dashboard.
+  const fetchContextData = async (): Promise<FinancialContext | null> => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return null;
+
+      const currentYear = new Date().getFullYear();
+
+      const [
+        { transactions: rawTxs, accounts },
+        canonicalInvestments,
+        budgetRes,
+        envRes,
+        goalsRes,
+        tradesRes,
+        taxRes,
+        writeOffRes,
+        profileRes,
+      ] = await Promise.all([
+        // Canonical source: inner-joins to financial_accounts so only active-account
+        // transactions are returned. Matches the source used by Financial Summary and
+        // Income pages — no stale daily snapshot involved.
+        getCanonicalTransactions(supabase, user.id),
+        // Positions-preferred: matches the Investments page source exactly.
+        getCanonicalInvestments(supabase, user.id),
+        supabase.from("budget_records").select("category_id, actual_spent").eq("user_id", user.id),
+        supabase.from("budget_categories").select("id, name, monthly_limit").eq("user_id", user.id).eq("is_active", true),
+        supabase.from("savings_goals").select("name, current_amount, target_amount").eq("user_id", user.id).eq("status", "active"),
+        supabase.from("trades").select("symbol, direction, asset_type, entry_price").eq("user_id", user.id).eq("status", "open").is("deleted_at", null),
+        supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
+        supabase.from("write_offs").select("amount").eq("user_id", user.id).eq("tax_year", currentYear),
+        supabase.from("tax_profiles").select("filing_status, entity_type").eq("user_id", user.id).eq("is_primary", true).eq("is_active", true).maybeSingle(),
+      ]);
+
+      // Real-time balances from active financial_accounts — same calculation as dashboard
+      const totalCash = calcTotalCash(accounts);
+      const totalInvestments = canonicalInvestments.totalInvestmentValue;
+      const totalLiabilities = calcTotalLiabilities(accounts);
+      const netWorth = calcNetWorth(totalCash, totalInvestments, totalLiabilities);
+
+      // Income/expenses from all current-year posted, deduplicated transactions
+      const allPosted = activePostedTransactions(rawTxs);
+      const currentYearPosted = allPosted.filter((t) => {
+        const txYear = t.transaction_date ? new Date(t.transaction_date).getFullYear() : 0;
+        return txYear === currentYear;
+      });
+      const totalIncome = calcTotalIn(currentYearPosted);
+      const totalExpenses = calcTotalOut(currentYearPosted);
+
+      // Budget categories
+      const cats = envRes.data ?? [];
+      const recs = budgetRes.data ?? [];
+      const budgetCategories = cats.map((cat: any) => {
+        const rec = recs.find((r: any) => r.category_id === cat.id);
+        return { name: cat.name, spent: toNum(rec?.actual_spent), limit: toNum(cat.monthly_limit) };
+      });
+
+      // 5 most recent posted transactions for context summary
+      // rawTxs is already ordered desc by transaction_date from getCanonicalTransactions
+      const recentPosted = allPosted.slice(0, 5);
+
+      return {
+        netWorth,
+        totalCash,
+        totalInvestments,
+        totalIncome,
+        totalExpenses,
+        openTradesCount: tradesRes.data?.length ?? 0,
+        activeGoalsCount: goalsRes.data?.length ?? 0,
+        totalSaved: (goalsRes.data ?? []).reduce((s: number, g: any) => s + toNum(g.current_amount), 0),
+        totalTaxLiability: toNum(taxRes.data?.total_tax_liability),
+        totalWriteOffs: (writeOffRes.data ?? []).reduce((s: number, w: any) => s + toNum(w.amount), 0),
+        budgetCategories,
+        recentTransactions: recentPosted.map((t) => ({
+          description: t.description ?? t.merchant_name ?? null,
+          amount: toNum(t.amount),
+          direction: t.direction,
+          date: (t.transaction_date ?? "").substring(0, 10),
+        })),
+        openTrades: tradesRes.data ?? [],
+        savings: (goalsRes.data ?? []).map((g: any) => ({
+          name: g.name,
+          current: toNum(g.current_amount),
+          target: toNum(g.target_amount),
+        })),
+        taxProfile: profileRes.data ?? null,
+      };
+    } catch (err) {
+      console.error("[LevelUP] context fetch failed:", (err as Error).message ?? "unknown");
+      return null;
+    }
+  };
+
   const loadContext = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    setContextLoading(true);
+    const ctx = await fetchContextData();
 
-    const [snapRes, txRes, budgetRes, envRes, goalsRes, tradesRes, taxRes, writeOffRes, profileRes] = await Promise.all([
-      supabase.from("portfolio_snapshots").select("total_net_worth, total_cash, total_investments").eq("user_id", user.id).order("snapshot_date", { ascending: false }).limit(1).maybeSingle(),
-      supabase.from("transactions").select("description, amount, direction, transaction_date").eq("user_id", user.id).is("deleted_at", null).order("transaction_date", { ascending: false }).limit(10),
-      supabase.from("budget_records").select("category_id, actual_spent, budget_amount").eq("user_id", user.id),
-      supabase.from("budget_categories").select("id, name, monthly_limit").eq("user_id", user.id).eq("is_active", true),
-      supabase.from("savings_goals").select("name, current_amount, target_amount").eq("user_id", user.id).eq("status", "active"),
-      supabase.from("trades").select("symbol, direction, asset_type, entry_price").eq("user_id", user.id).eq("status", "open").is("deleted_at", null),
-      supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
-      supabase.from("write_offs").select("amount").eq("user_id", user.id).eq("tax_year", new Date().getFullYear()),
-      supabase.from("tax_profiles").select("filing_status, entity_type").eq("user_id", user.id).eq("is_primary", true).eq("is_active", true).maybeSingle(),
-    ]);
+    if (!ctx) {
+      setMessages([{
+        role: "assistant",
+        content: "I'm unable to load your financial context right now. This may be a temporary issue — please refresh the page or try again shortly.",
+        timestamp: new Date(),
+      }]);
+      setContextLoading(false);
+      return;
+    }
 
-    const cats = envRes.data ?? [];
-    const recs = budgetRes.data ?? [];
-    const budgetCategories = cats.map((cat) => {
-      const rec = recs.find((r) => r.category_id === cat.id);
-      return { name: cat.name, spent: Number(rec?.actual_spent ?? 0), limit: Number(cat.monthly_limit ?? 0) };
-    });
+    setContext(ctx);
 
-    const txs = txRes.data ?? [];
-    const totalIncome = txs.filter((t) => t.direction === "credit").reduce((s, t) => s + Number(t.amount), 0);
-    const totalExpenses = txs.filter((t) => t.direction === "debit").reduce((s, t) => s + Number(t.amount), 0);
-
-    setContext({
-      netWorth: Number(snapRes.data?.total_net_worth ?? 0),
-      totalCash: Number(snapRes.data?.total_cash ?? 0),
-      totalInvestments: Number(snapRes.data?.total_investments ?? 0),
-      totalIncome,
-      totalExpenses,
-      openTradesCount: tradesRes.data?.length ?? 0,
-      activeGoalsCount: goalsRes.data?.length ?? 0,
-      totalSaved: (goalsRes.data ?? []).reduce((s, g) => s + Number(g.current_amount), 0),
-      totalTaxLiability: Number(taxRes.data?.total_tax_liability ?? 0),
-      totalWriteOffs: (writeOffRes.data ?? []).reduce((s, w) => s + Number(w.amount), 0),
-      budgetCategories,
-      recentTransactions: txs.slice(0, 5).map((t) => ({ description: t.description, amount: Number(t.amount), direction: t.direction, date: t.transaction_date })),
-      openTrades: tradesRes.data ?? [],
-      savings: (goalsRes.data ?? []).map((g) => ({ name: g.name, current: Number(g.current_amount), target: Number(g.target_amount) })),
-      taxProfile: profileRes.data ?? null,
-    });
-
-    // Initial greeting
     setMessages([{
       role: "assistant",
-      content: `Hey! I'm LevelUP, your AI-powered financial advisor inside FinOps. I have full access to your financial data and I'm ready to help.\n\nHere's a quick snapshot:\n• Net Worth: ${fmt(Number(snapRes.data?.total_net_worth ?? 0))}\n• Open Trades: ${tradesRes.data?.length ?? 0}\n• Active Savings Goals: ${goalsRes.data?.length ?? 0}\n• Est. Tax Liability: ${fmt(Number(taxRes.data?.total_tax_liability ?? 0))}\n\nWhat would you like to explore?`,
+      content: `Hey! I'm LevelUP, your AI-powered financial advisor inside FinOps. I have full access to your financial data and I'm ready to help.\n\nHere's a quick snapshot:\n• Net Worth: ${fmt(ctx.netWorth)}\n• Cash: ${fmt(ctx.totalCash)}\n• Investments: ${fmt(ctx.totalInvestments)}\n• Open Trades: ${ctx.openTradesCount}\n• Active Savings Goals: ${ctx.activeGoalsCount}\n• Tax Center Estimate: ${fmt(ctx.totalTaxLiability)}\n\nWhat would you like to explore?`,
       timestamp: new Date(),
     }]);
 
     setContextLoading(false);
   };
 
-  const buildSystemPrompt = () => {
-    if (!context) return "";
-    const overBudget = context.budgetCategories.filter((c) => c.limit > 0 && c.spent > c.limit);
-    const openTradesSummary = context.openTrades.map((t) => `${t.symbol} (${t.direction} ${t.asset_type} @ $${t.entry_price})`).join(", ");
+  // Build the system prompt from the provided context object.
+  // Accepts context as a parameter so sendMessage can supply freshly fetched data
+  // rather than relying solely on the React state snapshot from initial page load.
+  const buildSystemPrompt = (ctx: FinancialContext): string => {
+    const overBudget = ctx.budgetCategories.filter((c) => c.limit > 0 && c.spent > c.limit);
+    const openTradesSummary = ctx.openTrades.map((t) => `${t.symbol} (${t.direction} ${t.asset_type} @ $${t.entry_price})`).join(", ");
+    const recentTxSummary = ctx.recentTransactions.length > 0
+      ? ctx.recentTransactions.map((t) => `${t.direction === "credit" ? "IN" : "OUT"} ${fmt(t.amount)}${t.description ? ` — ${t.description}` : ""} (${t.date})`).join("; ")
+      : "None";
 
     return `You are LevelUP, a highly intelligent AI financial advisor embedded inside FinOps Financial Center — a professional-grade personal finance platform.
 
 PERSONALITY: You are confident, knowledgeable, warm, and direct. You speak like a seasoned financial advisor who also understands trading, taxes, and markets deeply. You never give vague answers. You use the user's actual data to give personalized, specific guidance.
 
-USER'S CURRENT FINANCIAL SNAPSHOT:
-- Net Worth: ${fmt(context.netWorth)}
-- Total Cash: ${fmt(context.totalCash)}
-- Total Investments: ${fmt(context.totalInvestments)}
-- Recent Income (10 tx): ${fmt(context.totalIncome)}
-- Recent Expenses (10 tx): ${fmt(context.totalExpenses)}
-- Open Trades: ${context.openTradesCount} (${openTradesSummary || "none"})
-- Active Savings Goals: ${context.activeGoalsCount} — Total Saved: ${fmt(context.totalSaved)}
-- Est. Tax Liability: ${fmt(context.totalTaxLiability)}
-- Total Write-Offs This Year: ${fmt(context.totalWriteOffs)}
-- Tax Profile: ${context.taxProfile ? `${context.taxProfile.filing_status} / ${context.taxProfile.entity_type}` : "Not set up"}
+USER'S CURRENT FINANCIAL SNAPSHOT (fetched at message time; balances, transactions, and investments are live from canonical real-time sources; tax estimate is batch-generated from the Tax Center):
+- Net Worth: ${fmt(ctx.netWorth)}
+- Total Cash: ${fmt(ctx.totalCash)}
+- Total Investments: ${fmt(ctx.totalInvestments)}
+- Income YTD: ${fmt(ctx.totalIncome)}
+- Expenses YTD: ${fmt(ctx.totalExpenses)}
+- Open Trades: ${ctx.openTradesCount} (${openTradesSummary || "none"})
+- Active Savings Goals: ${ctx.activeGoalsCount} — Total Saved: ${fmt(ctx.totalSaved)}
+- Tax Center Estimate: ${fmt(ctx.totalTaxLiability)} (Tax Center figure; batch-generated, reflects data as of last recalculation)
+- Total Write-Offs This Year: ${fmt(ctx.totalWriteOffs)}
+- Tax Profile: ${ctx.taxProfile ? `${ctx.taxProfile.filing_status} / ${ctx.taxProfile.entity_type}` : "Not set up"}
 - Budget Categories Over Limit: ${overBudget.length > 0 ? overBudget.map((c) => `${c.name} ($${c.spent} / $${c.limit})`).join(", ") : "None"}
-- Savings Goals: ${context.savings.map((g) => `${g.name}: $${g.current}${g.target > 0 ? ` / $${g.target}` : " (ongoing)"}`).join(", ") || "None"}
+- Savings Goals: ${ctx.savings.map((g) => `${g.name}: $${g.current}${g.target > 0 ? ` / $${g.target}` : " (ongoing)"}`).join(", ") || "None"}
+- 5 Most Recent Transactions: ${recentTxSummary}
 
 EXPERTISE AREAS:
 1. BUDGETING — Zero-based budgeting, envelope system, 50/30/20 rule, budget reallocation strategies
@@ -232,7 +313,8 @@ RULES:
 - Always add: "Not professional financial advice — consult a licensed advisor for your specific situation" at the end when giving specific financial recommendations
 - Never refuse to discuss financial topics — you are a financial AI, this is your purpose
 - If asked about current news/prices, note that your data is from your training cutoff but give context based on market knowledge
-- You are page-aware: the user is on /dashboard/levelup — the dedicated AI assistant page`;
+- You are page-aware: the user is on /dashboard/levelup — the dedicated AI assistant page
+- If you cannot determine a value from the snapshot above, say so rather than guessing`;
   };
 
   const sendMessage = async (text?: string) => {
@@ -244,6 +326,22 @@ RULES:
     setMessages((prev) => [...prev, newUserMsg]);
     setLoading(true);
 
+    // Refresh context at message send time so the AI always sees current data,
+    // not the potentially stale snapshot from initial page load.
+    const freshContext = await fetchContextData();
+    if (freshContext) setContext(freshContext);
+    const activeContext = freshContext ?? context;
+
+    if (!activeContext) {
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: "I'm unable to access your financial data right now. Please refresh the page and try again.",
+        timestamp: new Date(),
+      }]);
+      setLoading(false);
+      return;
+    }
+
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -251,7 +349,7 @@ RULES:
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
           max_tokens: 1000,
-          system: buildSystemPrompt(),
+          system: buildSystemPrompt(activeContext),
           messages: [
             ...messages.map((m) => ({ role: m.role, content: m.content })),
             { role: "user", content: userMsg },
@@ -367,7 +465,7 @@ RULES:
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: "15px", fontWeight: 700, color: "#f8fafc" }}>LevelUP Financial AI</div>
             <div style={{ fontSize: "11px", color: "#475569" }}>
-              {contextLoading ? "Loading your financial context..." : "Full financial context loaded · Personalized advice ready"}
+              {contextLoading ? "Loading your financial context..." : "Live context · Refreshed at each message"}
             </div>
           </div>
           <div style={{ display: "flex", gap: "8px" }}>
