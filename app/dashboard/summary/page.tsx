@@ -7,7 +7,7 @@ import {
   calcTotalExpenses,
   toNum,
 } from "../../../src/lib/financialCalculations";
-import { getCanonicalActivePostedTransactions, getCanonicalAccountBalances, getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalActivePostedTransactions, getCanonicalAccountBalances, getCanonicalInvestments, getCanonicalTaxableIncome } from "../../../src/lib/canonicalFinancialData";
 
 interface AccountData {
   id: string;
@@ -26,7 +26,8 @@ interface FinancialData {
   totalLiabilities: number;
   totalIncome: number;
   totalExpenses: number;
-  estimatedTax: number;
+  /** null = no batch estimate exists; 0 = live canonical taxable profit is zero; positive = batch estimate */
+  estimatedTax: number | null;
   savings: number;
   cd: number;
   checking: number;
@@ -170,8 +171,10 @@ export default function FinancialSummaryPage() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
+    const currentYear = new Date().getFullYear();
+
     // Use canonical sources for all financial data
-    const [postedTransactions, balances, investments, taxRes] = await Promise.all([
+    const [postedTransactions, balances, investments, taxRes, ctiRes] = await Promise.all([
       getCanonicalActivePostedTransactions(supabase, user.id),
       getCanonicalAccountBalances(supabase, user.id),
       getCanonicalInvestments(supabase, user.id),
@@ -183,6 +186,8 @@ export default function FinancialSummaryPage() {
         .order("calculated_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
+      // Same canonical source as Tax Center — needed to apply the liveZero gate
+      getCanonicalTaxableIncome(supabase, user.id, currentYear),
     ]);
 
     const accounts: AccountData[] = balances.accounts as AccountData[];
@@ -235,7 +240,11 @@ export default function FinancialSummaryPage() {
       totalLiabilities,
       totalIncome,
       totalExpenses,
-      estimatedTax: toNum(taxRes.data?.total_tax_liability),
+      // Match Tax Center semantics: suppress stale batch liability when live taxable profit is zero.
+      // null = no batch estimate exists yet; 0 = live canonical zero; positive = batch estimate.
+      estimatedTax: ctiRes.taxableProfit === 0
+        ? 0
+        : taxRes.data !== null ? toNum(taxRes.data.total_tax_liability) : null,
       savings,
       cd,
       checking,
@@ -268,7 +277,7 @@ export default function FinancialSummaryPage() {
     { label: "Total Expenses", value: fmt(data.totalExpenses), color: "#ef4444", rgb: "239,68,68",    icon: "↓", sub: "Money out" },
     { label: "Net Cash Flow",  value: fmt(netCashFlow),        color: netCashFlow >= 0 ? "#22c55e" : "#f59e0b", rgb: netCashFlow >= 0 ? "34,197,94" : "245,158,11", icon: "⟷", sub: "Income minus expenses" },
     { label: "Investments",    value: fmt(data.totalInvestments), color: "#a855f7", rgb: "168,85,247", icon: "📈", sub: "Portfolio value" },
-    { label: "Est. Tax",       value: data.estimatedTax > 0 ? fmt(data.estimatedTax) : "—", color: "#f59e0b", rgb: "245,158,11", icon: "⚡", sub: data.estimatedTax > 0 ? "2026 estimate" : "Tag income first" },
+    { label: "Est. Tax",       value: data.estimatedTax !== null ? fmt(data.estimatedTax) : "—", color: "#f59e0b", rgb: "245,158,11", icon: "⚡", sub: data.estimatedTax !== null ? "2026 estimate" : "Tag income first" },
   ];
 
   const assetSegments = [
@@ -462,7 +471,7 @@ export default function FinancialSummaryPage() {
               { label: "Net Position", value: netCashFlow >= 0 ? "Positive" : "Negative", good: netCashFlow >= 0 },
               { label: "Debt Load",    value: data.totalLiabilities > 0 ? fmt(data.totalLiabilities, true) : "Clear", good: data.totalLiabilities === 0 },
               { label: "Savings",      value: totalSavings > 0 ? fmt(totalSavings, true) : "None", good: totalSavings > 0 },
-              { label: "Tax Status",   value: data.estimatedTax > 0 ? "Estimated" : "Pending", good: data.estimatedTax > 0 },
+              { label: "Tax Status",   value: data.estimatedTax !== null ? "Estimated" : "Pending", good: data.estimatedTax !== null },
             ].map((h, i) => (
               <div key={i}>
                 <div style={{ fontSize: "9px", color: "#334155", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "4px" }}>{h.label.toUpperCase()}</div>
