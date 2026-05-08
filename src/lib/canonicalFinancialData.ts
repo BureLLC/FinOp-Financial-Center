@@ -820,9 +820,15 @@ export async function getCanonicalTaxableIncome(
     getCanonicalCombinedWriteOffs(supabase, userId, taxYear),
   ]);
 
-  // Business income from transactions tagged as business/self-employment income
+  // Business income from transactions tagged as business/self-employment income,
+  // filtered to the same tax year as deductible expenses so both sides of
+  // taxableProfit = businessIncome - deductibleExpenses use the same year scope.
   const businessIncome = postedTxs
-    .filter((tx) => isBusinessIncome(tx))
+    .filter((tx) => isBusinessIncome(tx) && tx.transaction_date)
+    .filter((tx) => {
+      const txYear = new Date(tx.transaction_date!).getFullYear();
+      return txYear === taxYear;
+    })
     .reduce((sum, tx) => sum + toNum(tx.amount), 0);
 
   // Also include deductible expenses directly from transactions (not just manual write-offs)
