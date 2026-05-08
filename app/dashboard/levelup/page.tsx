@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "../../../src/lib/supabase";
-import { getCanonicalTransactions, getCanonicalInvestments } from "../../../src/lib/canonicalFinancialData";
+import { getCanonicalTransactions, getCanonicalInvestments, getCanonicalCombinedWriteOffs } from "../../../src/lib/canonicalFinancialData";
 import {
   activePostedTransactions,
   calcTotalCash,
@@ -165,7 +165,7 @@ export default function LevelUpPage() {
         goalsRes,
         tradesRes,
         taxRes,
-        writeOffRes,
+        writeOffCombined,
         profileRes,
       ] = await Promise.all([
         // Canonical source: inner-joins to financial_accounts so only active-account
@@ -179,7 +179,8 @@ export default function LevelUpPage() {
         supabase.from("savings_goals").select("name, current_amount, target_amount").eq("user_id", user.id).eq("status", "active"),
         supabase.from("trades").select("symbol, direction, asset_type, entry_price").eq("user_id", user.id).eq("status", "open").is("deleted_at", null),
         supabase.from("tax_estimates").select("total_tax_liability").eq("user_id", user.id).eq("period_type", "annual").order("calculated_at", { ascending: false }).limit(1).maybeSingle(),
-        supabase.from("write_offs").select("amount").eq("user_id", user.id).eq("tax_year", currentYear),
+        // Same canonical source as the Write-Offs page: manual + transaction-based, scoped to year.
+        getCanonicalCombinedWriteOffs(supabase, user.id, currentYear),
         supabase.from("tax_profiles").select("filing_status, entity_type").eq("user_id", user.id).eq("is_primary", true).eq("is_active", true).maybeSingle(),
       ]);
 
@@ -220,7 +221,22 @@ export default function LevelUpPage() {
         activeGoalsCount: goalsRes.data?.length ?? 0,
         totalSaved: (goalsRes.data ?? []).reduce((s: number, g: any) => s + toNum(g.current_amount), 0),
         totalTaxLiability: toNum(taxRes.data?.total_tax_liability),
-        totalWriteOffs: (writeOffRes.data ?? []).reduce((s: number, w: any) => s + toNum(w.amount), 0),
+        // Dedup: match the Write-Offs page exactly — manual entries + tx-based not already
+        // linked to a manual write-off via transaction_id. Avoids double-counting.
+        totalWriteOffs: (() => {
+          const linkedTxIds = new Set(
+            writeOffCombined.manual
+              .filter((m: any) => m.transaction_id)
+              .map((m: any) => m.transaction_id)
+          );
+          const manualTotal = writeOffCombined.manual.reduce(
+            (s: number, m: any) => s + toNum(m.amount), 0
+          );
+          const txTotal = writeOffCombined.transactionBased
+            .filter((tx: any) => !linkedTxIds.has(tx.id))
+            .reduce((s: number, tx: any) => s + toNum(tx.amount), 0);
+          return manualTotal + txTotal;
+        })(),
         budgetCategories,
         recentTransactions: recentPosted.map((t) => ({
           description: t.description ?? t.merchant_name ?? null,
