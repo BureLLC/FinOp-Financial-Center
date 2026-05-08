@@ -5,6 +5,8 @@
  * - Business income is filtered to the selected/current tax year before summing
  * - Prior-year business/self-employment income is excluded from the current-year calculation
  * - Current-year deductible expenses are still subtracted (same year scope both sides)
+ * - A valid zero taxableProfit does NOT trigger the tax_estimates fallback
+ * - The tax_estimates fallback is only used when live data truly failed to load
  * - Excluded income types remain excluded (salary, rental, dividend, etc.)
  * - Excluded transaction states remain excluded (pending, deleted, etc.)
  * - Tax Center label/helper text is honest about what is and is not included
@@ -285,5 +287,143 @@ test("deductibleExpenses still uses Math.max of write-offs vs tx-based (not chan
     CANONICAL_SRC,
     /Math\.max\(writeOffs\.totalDeductible,\s*txBasedDeductible\)/,
     "deductibleExpenses must still take Math.max of write-offs vs tx-based to avoid double-counting"
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Fallback guard: valid zero must not trigger tax_estimates fallback
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("displayTaxableIncome uses canonicalTaxableIncome !== null as fallback guard (not > 0)", () => {
+  // The old guard `cti.taxableProfit > 0` treated a valid zero as missing data,
+  // causing the stale tax_estimates value to override a correct zero result.
+  // The correct guard is whether live data loaded at all (null = not loaded).
+  assert.match(
+    TAX_PAGE_SRC,
+    /canonicalTaxableIncome\s*!==\s*null/,
+    "displayTaxableIncome fallback guard must be `canonicalTaxableIncome !== null`, not `> 0`"
+  );
+});
+
+test("displayTaxableIncome does not use taxableProfit > 0 as fallback trigger", () => {
+  // `taxableProfit > 0` incorrectly treated zero (a valid result) as missing data.
+  assert.doesNotMatch(
+    TAX_PAGE_SRC,
+    /taxableProfit\s*>\s*0[\s\S]{0,50}?taxable_income/,
+    "displayTaxableIncome must not fall back to tax_estimates when taxableProfit is 0"
+  );
+});
+
+test("displayTaxableIncome uses cti.taxableProfit when live data loaded", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /canonicalTaxableIncome\s*!==\s*null[\s\S]{0,30}?cti\.taxableProfit/,
+    "displayTaxableIncome must use cti.taxableProfit when canonicalTaxableIncome is not null"
+  );
+});
+
+test("tax_estimates fallback for Taxable Income only fires when canonicalTaxableIncome is null", () => {
+  // The ternary must produce `cti.taxableProfit` on the truthy branch (live data loaded)
+  // and `annual?.taxable_income ?? 0` on the falsy branch (live data not yet loaded).
+  assert.match(
+    TAX_PAGE_SRC,
+    /canonicalTaxableIncome\s*!==\s*null[\s\S]{0,60}?cti\.taxableProfit[\s\S]{0,80}?annual\?\.taxable_income/,
+    "fallback must only use annual.taxable_income when canonicalTaxableIncome is null"
+  );
+});
+
+test("taxableProfit is still capped at zero in the canonical calculation (Math.max)", () => {
+  assert.match(
+    CANONICAL_SRC,
+    /Math\.max\(businessIncome\s*-\s*deductibleExpenses,\s*0\)/,
+    "taxableProfit must still be capped at zero by Math.max in canonical calculation"
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Zero scenarios: deductible >= income must display 0, not fallback
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("taxableProfit formula guarantees zero when deductibleExpenses >= businessIncome", () => {
+  // Math.max(x - y, 0) where y >= x always yields 0.
+  // This is the canonical guarantee that zero is a real result, not missing data.
+  assert.match(
+    CANONICAL_SRC,
+    /Math\.max\(businessIncome\s*-\s*deductibleExpenses,\s*0\)/,
+    "Math.max cap ensures zero when deductible expenses equal or exceed business income"
+  );
+});
+
+test("taxableProfit formula guarantees zero does not exceed businessIncome", () => {
+  // taxableProfit = MAX(businessIncome - deductibleExpenses, 0)
+  // Since deductibleExpenses >= 0, taxableProfit <= businessIncome always.
+  // Both must be present in the formula; their relationship enforces the invariant.
+  const fnBody = CANONICAL_SRC.match(
+    /export async function getCanonicalTaxableIncome[\s\S]{0,2000}?return \{[\s\S]{0,200}?\}/
+  );
+  assert.ok(fnBody, "getCanonicalTaxableIncome must be extractable");
+  const body = fnBody[0];
+  assert.match(body, /businessIncome/, "businessIncome must appear in taxable profit formula");
+  assert.match(body, /deductibleExpenses/, "deductibleExpenses must be subtracted from businessIncome");
+  assert.match(body, /Math\.max[\s\S]{0,60}?,\s*0\)/, "result must be capped at 0 — never below zero");
+});
+
+test("displayTaxableIncome comes from cti.taxableProfit which is always <= cti.businessIncome", () => {
+  // When live data is loaded, displayTaxableIncome = cti.taxableProfit.
+  // cti.taxableProfit = MAX(businessIncome - deductibleExpenses, 0) <= businessIncome.
+  // Verify both cti.taxableProfit and cti.businessIncome are rendered from the same cti object.
+  assert.match(TAX_PAGE_SRC, /cti\.taxableProfit/, "Taxable Income card must use cti.taxableProfit");
+  assert.match(TAX_PAGE_SRC, /cti\.businessIncome/, "Business Income card must use cti.businessIncome");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Effective Rate uses corrected displayTaxableIncome, not stale fallback
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("effectiveRate is computed from displayTaxableIncome (not raw tax_estimates.taxable_income)", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /effectiveRate[\s\S]{0,80}?displayTaxableIncome/,
+    "effectiveRate must reference displayTaxableIncome (the corrected live value)"
+  );
+  assert.doesNotMatch(
+    TAX_PAGE_SRC,
+    /effectiveRate[\s\S]{0,80}?taxable_income/,
+    "effectiveRate must not directly reference tax_estimates.taxable_income"
+  );
+});
+
+test("effectiveRate is zero when displayTaxableIncome is zero (guard in place)", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /displayTaxableIncome\s*>\s*0[\s\S]{0,50}?totalLiability\s*\/\s*displayTaxableIncome/,
+    "effectiveRate must guard against division when displayTaxableIncome is 0"
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10. Total Tax Liability and Balance Due are independent of displayTaxableIncome
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("Total Tax Liability comes directly from tax_estimates (not derived from displayTaxableIncome)", () => {
+  // totalLiability is the recalculated backend value — it must NOT be derived from the
+  // potentially-stale displayTaxableIncome. It should come straight from annual.total_tax_liability.
+  assert.match(
+    TAX_PAGE_SRC,
+    /totalLiability\s*=\s*annual\?\.total_tax_liability/,
+    "totalLiability must come from annual.total_tax_liability, not from displayTaxableIncome"
+  );
+});
+
+test("Balance Due comes directly from tax_estimates (not derived from displayTaxableIncome)", () => {
+  assert.match(
+    TAX_PAGE_SRC,
+    /annual\?\.balance_due/,
+    "Balance Due must come from annual.balance_due in tax_estimates"
+  );
+  assert.doesNotMatch(
+    TAX_PAGE_SRC,
+    /balance_due[\s\S]{0,50}?displayTaxableIncome/,
+    "Balance Due must not be computed from displayTaxableIncome"
   );
 });

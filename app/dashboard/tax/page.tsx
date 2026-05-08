@@ -297,8 +297,9 @@ export default function TaxCenterPage() {
   const currentQuarter = Math.ceil((new Date().getMonth() + 1) / 3);
   // Canonical taxable income for display (business income, deductible expenses, taxable profit)
   const cti = canonicalTaxableIncome ?? { businessIncome: 0, deductibleExpenses: 0, taxableProfit: 0 };
-  // Display canonical taxable income when available, fall back to tax_estimates
-  const displayTaxableIncome = cti.taxableProfit > 0
+  // Zero is a valid live result (deductible expenses >= business income).
+  // Only fall back to tax_estimates when live data truly failed to load (state is null).
+  const displayTaxableIncome = canonicalTaxableIncome !== null
     ? cti.taxableProfit
     : Number(annual?.taxable_income ?? 0);
   // Total Tax Liability comes from the existing IRS/state tax engine (tax_estimates)
