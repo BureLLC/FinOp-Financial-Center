@@ -302,16 +302,21 @@ export default function TaxCenterPage() {
   const displayTaxableIncome = canonicalTaxableIncome !== null
     ? cti.taxableProfit
     : Number(annual?.taxable_income ?? 0);
+  // When live canonical data is loaded and taxable income is zero, all liability
+  // figures must also be zero. Stale tax_estimates must not override a valid live zero.
+  const liveZero = canonicalTaxableIncome !== null && displayTaxableIncome === 0;
   // Total Tax Liability comes from the existing IRS/state tax engine (tax_estimates)
-  // which is recalculated via orchestrate-refresh. Do not override with a simplified formula.
-  const totalLiability = annual?.total_tax_liability ?? 0;
+  // which is recalculated via orchestrate-refresh. Suppressed to zero when live income is zero.
+  const totalLiability = liveZero ? 0 : (annual?.total_tax_liability ?? 0);
   const effectiveRate = displayTaxableIncome > 0
     ? (totalLiability / displayTaxableIncome) * 100 : 0;
-  const taxBreakdown = annual ? [
+  const taxBreakdown = liveZero ? [] : annual ? [
     { label: "Federal Income Tax",  value: Number(annual.income_tax),         color: "#38bdf8", rgb: "56,189,248" },
     { label: "Self-Employment Tax", value: Number(annual.self_employment_tax), color: "#a855f7", rgb: "168,85,247" },
     { label: "Capital Gains Tax",   value: Number(annual.capital_gains_tax),   color: "#f59e0b", rgb: "245,158,11" },
   ].filter((t) => t.value > 0) : [];
+  const displayBalanceDue = liveZero ? 0 : (annual?.balance_due ?? 0);
+  const displayUnderpayment = liveZero ? false : (annual?.underpayment_flag ?? false);
 
   // ── Profile form — renders inside any modal ───────────────────────────────
   const ProfileForm = () => (
@@ -499,7 +504,7 @@ export default function TaxCenterPage() {
               { label: "Business Income",      value: fmt(cti.businessIncome), color: "#22c55e", rgb: "34,197,94", sub: "Gross business revenue" },
               { label: "Deductible Expenses",  value: fmt(cti.deductibleExpenses), color: "#f97316", rgb: "249,115,22", sub: "Write-offs applied" },
               { label: "Effective Rate",       value: `${effectiveRate.toFixed(1)}%`,   color: "#f59e0b", rgb: "245,158,11", sub: "Of taxable income" },
-              { label: "Balance Due",          value: fmt(annual?.balance_due ?? 0),    color: annual?.underpayment_flag ? "#ef4444" : "#22c55e", rgb: annual?.underpayment_flag ? "239,68,68" : "34,197,94", sub: annual?.underpayment_flag ? "⚠️ Underpayment" : "On track" },
+              { label: "Balance Due",          value: fmt(displayBalanceDue),           color: displayUnderpayment ? "#ef4444" : "#22c55e", rgb: displayUnderpayment ? "239,68,68" : "34,197,94", sub: displayUnderpayment ? "⚠️ Underpayment" : "On track" },
               { label: "Tagged Income",        value: String(taggedIncomeCount),         color: "#a855f7", rgb: "168,85,247", sub: "All types tagged" },
             ].map((k, i) => (
               <div key={i} style={{ padding: "16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: "12px", position: "relative", overflow: "hidden" }}>
@@ -587,7 +592,7 @@ export default function TaxCenterPage() {
                 const qEst = quarterly.find((e) => e.quarter === q);
                 const isCurrentQ = q === currentQuarter;
                 const isPastQ = q < currentQuarter;
-                const amount = qEst?.total_tax_liability ?? 0;
+                const amount = liveZero ? 0 : (qEst?.total_tax_liability ?? 0);
                 return (
                   <div key={q} style={{ padding: "16px", background: isCurrentQ ? "rgba(37,99,235,0.08)" : "rgba(255,255,255,0.02)", border: `1px solid ${isCurrentQ ? "rgba(37,99,235,0.25)" : "rgba(255,255,255,0.05)"}`, borderRadius: "12px", position: "relative" }}>
                     {isCurrentQ && <div style={{ position: "absolute", top: "10px", right: "10px", padding: "2px 8px", background: "rgba(37,99,235,0.2)", border: "1px solid rgba(37,99,235,0.3)", borderRadius: "99px", fontSize: "9px", fontWeight: 700, color: "#38bdf8" }}>NOW</div>}
