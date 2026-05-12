@@ -72,26 +72,45 @@ serve(async (req) => {
     // Check for existing queued/processing job
     const { data: existingJob } = await supabase
       .from("refresh_jobs")
-      .select("id")
+      .select("id, status, started_at")
       .eq("user_id", userId)
       .in("status", ["queued", "processing"])
       .limit(1)
       .maybeSingle()
 
     if (existingJob) {
-      console.log("orchestrate:existing_job", existingJob.id)
-      // Still trigger worker in case it got stuck
-      const workerUrl = `${supabaseUrl}/functions/v1/process-refresh-job`
-      await fetch(workerUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "apikey": serviceRoleKey,
-          "Authorization": `Bearer ${serviceRoleKey}`
-        },
-        body: JSON.stringify({ job_id: existingJob.id })
-      })
-      return json({ status: "already_processing", job_id: existingJob.id }, 200)
+      // A "processing" job started > 2 minutes ago was likely killed by an edge-function
+      // timeout without reaching its own catch block. Reset it so a fresh job can proceed.
+      const isStale = existingJob.status === "processing"
+        && existingJob.started_at
+        && (Date.now() - new Date(existingJob.started_at).getTime()) > 2 * 60 * 1000
+
+      if (isStale) {
+        console.log("orchestrate:stale_processing_job_reset", existingJob.id)
+        await supabase
+          .from("refresh_jobs")
+          .update({
+            status: "failed",
+            error_message: "Job timed out — reset by orchestrator",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", existingJob.id)
+        // Fall through to create a new job below
+      } else {
+        console.log("orchestrate:existing_job", existingJob.id)
+        // Re-trigger in case the worker needs a nudge for a genuinely in-flight job
+        const workerUrl = `${supabaseUrl}/functions/v1/process-refresh-job`
+        await fetch(workerUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": serviceRoleKey,
+            "Authorization": `Bearer ${serviceRoleKey}`
+          },
+          body: JSON.stringify({ job_id: existingJob.id })
+        })
+        return json({ status: "already_processing", job_id: existingJob.id }, 200)
+      }
     }
 
     // Create new job
