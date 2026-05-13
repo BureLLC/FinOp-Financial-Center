@@ -81,6 +81,35 @@ test("upsertTransaction: return type annotation includes all three values", () =
   );
 });
 
+test("upsertTransaction: update payload clears deleted_at on soft-deleted row", () => {
+  // The update branch must include deleted_at: null so that transactions
+  // soft-deleted by a prior delete-connection operation become visible again
+  // after the connection is reconnected and synced.
+  const updateRegion = src.slice(
+    src.indexOf("if (existing) {"),
+    src.indexOf('return "updated"') + 20
+  );
+  assert.match(
+    updateRegion,
+    /deleted_at\s*:\s*null/,
+    "upsertTransaction update payload must include deleted_at: null to reactivate soft-deleted transactions"
+  );
+});
+
+test("upsertTransaction: deleted_at: null and status update are in the same .update() call", () => {
+  // Scope to the upsertTransaction function body only, not syncIntegrations
+  const fnStart = src.indexOf("async function upsertTransaction(");
+  const fnEnd = src.indexOf("\nasync function ", fnStart + 1);
+  const fnBody = fnStart !== -1 ? src.slice(fnStart, fnEnd !== -1 ? fnEnd : undefined) : "";
+  assert.ok(fnBody.length > 0, "upsertTransaction function must exist in source");
+  // Find the existing-row update block (before 'return "updated"')
+  const updatedIdx = fnBody.indexOf('return "updated"');
+  assert.ok(updatedIdx !== -1, 'return "updated" must exist in upsertTransaction');
+  const existingBranch = fnBody.slice(0, updatedIdx);
+  assert.match(existingBranch, /status\s*:/, "existing-row update must set status");
+  assert.match(existingBranch, /deleted_at\s*:\s*null/, "existing-row update must set deleted_at: null");
+});
+
 // ─── 3. Transaction insert isolation ─────────────────────────────────────────
 
 test("syncIntegrations: transaction loop wraps upsertTransaction in try/catch", () => {
