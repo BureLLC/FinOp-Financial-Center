@@ -754,7 +754,7 @@ async function upsertTransaction(
   if (existing) {
     await supabase
       .from("transactions")
-      .update({ status: tx.pending ? "pending" : "posted", updated_at: new Date().toISOString() })
+      .update({ status: tx.pending ? "pending" : "posted", deleted_at: null, updated_at: new Date().toISOString() })
       .eq("id", existing.id)
     return "updated"
   }
