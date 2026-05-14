@@ -10,7 +10,7 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.process-refresh-job]
-verify_jwt = true
+verify_jwt = false
 
 [functions.snaptrade-connect]
 verify_jwt = true
