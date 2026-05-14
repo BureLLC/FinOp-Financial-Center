@@ -63,7 +63,6 @@ export async function createOrStrengthenRule(
     .eq("action_type", "set_category")
     .eq("matcher_type", matcherType)
     .eq("status", "active")
-    .neq("deleted_at", null)
     .is("deleted_at", null)
     .limit(10);
 

@@ -84,6 +84,7 @@ export async function generateAndStoreSuggestions(
   const { data: txRows } = await supabase
     .from("transactions")
     .select("id, direction, amount, status, deleted_at, merchant_name, description, category, subcategory, transaction_date, income_subtype, transaction_type, financial_account_id, external_transaction_id, provider")
+    .eq("user_id", rule.user_id)
     .eq("direction", "debit")
     .is("category", null)
     .is("deleted_at", null)
